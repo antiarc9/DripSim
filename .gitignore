@@ -1,0 +1,7 @@
+plugin/build/
+dist/
+preview_out/
+config.json
+*.pdb
+*.map
+plugin/tools/preview/body_pack.bin
