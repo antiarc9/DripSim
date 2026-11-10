@@ -74,6 +74,37 @@ namespace
             return player && player->Is3DLoaded() && player->AsActorState()->IsSwimming();
         }
 
+        float Exertion() const override
+        {
+            auto* player = RE::PlayerCharacter::GetSingleton();
+            if (!player || !player->Is3DLoaded()) return 0.0f;
+            const auto* state = player->AsActorState();
+            float effort = 0.0f;
+            if (state->IsSprinting()) effort = 1.0f;
+            else if (state->IsRunning()) effort = 0.3f;
+            switch (state->GetAttackState()) {
+            case RE::ATTACK_STATE_ENUM::kSwing:
+            case RE::ATTACK_STATE_ENUM::kHit:
+            case RE::ATTACK_STATE_ENUM::kNextAttack:
+            case RE::ATTACK_STATE_ENUM::kBash:
+            case RE::ATTACK_STATE_ENUM::kBowDraw:
+            case RE::ATTACK_STATE_ENUM::kBowDrawn:
+                effort = std::max(effort, 0.7f);
+                break;
+            default:
+                break;
+            }
+            if (state->IsWeaponDrawn() && player->IsInCombat()) effort = std::max(effort, 0.4f);
+            if (auto* values = player->AsActorValueOwner()) {  // low stamina right after effort: the body is still working
+                const float maximum = values->GetPermanentActorValue(RE::ActorValue::kStamina);
+                if (maximum > 1.0f) {
+                    const float missing = std::clamp(1.0f - values->GetActorValue(RE::ActorValue::kStamina) / maximum, 0.0f, 1.0f);
+                    effort = std::max(effort, missing * 0.6f);
+                }
+            }
+            return std::clamp(effort, 0.0f, 1.0f);
+        }
+
         void Tick(float dt)
         {
             m_timer -= dt;

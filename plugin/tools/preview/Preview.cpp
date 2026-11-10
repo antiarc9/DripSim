@@ -15,6 +15,7 @@
 //          --size WxH    picture size (default 900x900)           --ini K=V,K=V        settings of the mode (its INI keys)
 //          --rain X      rain intensity 0..1 (forced mode, default 0.9)   --skin r,g,b   --soak D   water that comes off a dunk, skin below D game units wet (1000 = all)
 //          --atlas       also write the raw 1024x1024 film        --verbose            print the mode's log lines
+//          --also-rain   runs the rain mode in a second layer on top of the main mode (stacking test)
 #include "Field.h"
 #include "Film.h"
 #include "RainMode.h"
@@ -82,6 +83,8 @@ namespace
     {
     public:
         float rain = 0.9f;
+        float exertion = 0.0f;
+        float Exertion() const override { return exertion; }
         float RainIntensity() const override { return rain; }
         bool IsInterior() const override { return false; }
         bool SkyExposed() const override { return true; }
@@ -343,6 +346,17 @@ namespace
         return image;
     }
 
+    // The modes by name (nullptr = unknown; a public build only knows "rain"), and the INI each mode reads.
+    DripSim::IMode* ModeByName(const std::string& name)
+    {
+        return name == "rain" ? RainModeInstance() : nullptr;
+    }
+
+    std::string IniName(const std::string& mode)
+    {
+        return "DripSimRain";
+    }
+
     // ------------------------------------------------------------------ command line
     struct Args
     {
@@ -356,6 +370,7 @@ namespace
         std::string ini;
         int variant = 0;
         float rain = 0.9f;
+        bool alsoRain = false;  // a second layer with the rain mode on top of the main mode
         float soak = 0.0f;  // rain mode: a soak (water to this many game units; 1000 = all of the body) instead of rain
         int seed = 7;
         bool atlas = false;
@@ -401,6 +416,7 @@ namespace
             else if (k == "--variant") a.variant = std::stoi(next());
             else if (k == "--rain") a.rain = std::stof(next());
             else if (k == "--soak") a.soak = std::stof(next());
+            else if (k == "--also-rain") a.alsoRain = true;
             else if (k == "--skin") {
                 const auto p = Split(next(), ',');
                 if (p.size() == 3) {
@@ -415,7 +431,7 @@ namespace
                 return false;
             }
         }
-        return a.mode == "rain";
+        return ModeByName(a.mode) != nullptr;
     }
 
     void SetView(Args& a)
@@ -448,7 +464,7 @@ int main(int argc, char** argv)
     }
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(args.out) / "Data" / "SKSE" / "Plugins", ec);
-    const std::string iniName = "DripSimRain";
+    const std::string iniName = IniName(args.mode);
     {  // the mode reads Data\SKSE\Plugins\<name>.ini relative to the current directory: give it one with the requested settings
         std::ofstream ini(std::filesystem::path(args.out) / "Data" / "SKSE" / "Plugins" / (iniName + ".ini"));
         if (args.mode == "rain") ini << "ForcedIntensity=" << args.rain << "\n";
@@ -456,6 +472,10 @@ int main(int argc, char** argv)
         for (const auto& kv : Split(args.ini, ',')) {
             if (!kv.empty()) ini << kv << "\n";
         }
+    }
+    if (args.alsoRain && args.mode != "rain") {
+        std::ofstream rainIni(std::filesystem::path(args.out) / "Data" / "SKSE" / "Plugins" / "DripSimRain.ini");
+        rainIni << "ForcedIntensity=" << args.rain << "\n";
     }
     std::filesystem::current_path(args.out, ec);
 
@@ -471,7 +491,7 @@ int main(int argc, char** argv)
     DS::Film::SetNormalMapsEnabled(true);
     auto* layer = DS::Film::Acquire(DS::Surface::Body, field.KeepMask().data());
     Host host(layer, &fieldView, &world);
-    DripSim::IMode* mode = RainModeInstance();
+    DripSim::IMode* mode = ModeByName(args.mode);
     if (args.mode == "rain" && args.soak > 0.0f) {
         world.rain = 0.0f;
         RainLoadSettings();  // (the soak request is ignored unless EnableSoak=1 is loaded)
@@ -480,6 +500,14 @@ int main(int argc, char** argv)
     const std::int32_t variant = args.soak > 0.0f ? 2 : 1;
     if (!mode->Start(&host, variant)) {
         std::printf("the mode declined to start\n");
+        return 1;
+    }
+    // stacking test: the rain mode in a second layer on top of the main mode
+    DS::Film::Layer* layer2 = args.alsoRain && args.mode != "rain" ? DS::Film::Acquire(DS::Surface::Body, field.KeepMask().data()) : nullptr;
+    Host host2(layer2, &fieldView, &world);
+    DripSim::IMode* mode2 = layer2 ? RainModeInstance() : nullptr;
+    if (mode2 && !mode2->Start(&host2, 1)) {
+        std::printf("the second (rain) mode declined to start\n");
         return 1;
     }
 
@@ -493,6 +521,7 @@ int main(int argc, char** argv)
         const auto m0 = std::chrono::steady_clock::now();
         DS::Film::BeginFrame(DS::Surface::Body);
         mode->Update(&host, dt);
+        if (mode2) mode2->Update(&host2, dt);
         DS::Film::EndFrame(DS::Surface::Body);
         const auto m1 = std::chrono::steady_clock::now();
         DS::Film::Render(DS::Surface::Body);
@@ -501,7 +530,7 @@ int main(int argc, char** argv)
         renderMs += std::chrono::duration<double, std::milli>(m2 - m1).count();
         while (nextShot < args.at.size() && t + dt * 0.5f >= args.at[nextShot]) {
             const auto name = std::format("{}_{}_t{:04.1f}.png", args.mode, args.viewName, args.at[nextShot]);
-            const auto pixels = RenderBody(*body, *layer, DS::Film::Pixels(DS::Surface::Body), DS::Film::NormalPixels(DS::Surface::Body), args.view, field.ZMin() - 10.0f, field.ZMax() + 10.0f);
+            const auto pixels = RenderBody(*body, layer2 ? *layer2 : *layer, DS::Film::Pixels(DS::Surface::Body), DS::Film::NormalPixels(DS::Surface::Body), args.view, field.ZMin() - 10.0f, field.ZMax() + 10.0f);
             WritePng(name, pixels, args.view.width, args.view.height);
             if (args.atlas) {
                 constexpr int kAtlas = DS::Film::kSize;
@@ -524,6 +553,7 @@ int main(int argc, char** argv)
     std::printf("simulated %d frames (%.1f s) in %.1f s; mode %.2f ms/frame, film render %.2f ms/frame (on this machine)\n", frames, static_cast<double>(frames) * dt, total,
         modeMs / std::max(frames, 1), renderMs / std::max(frames, 1));
     std::printf("layer tiles rendered per frame: %.1f (of %d)\n", static_cast<double>(DS::Film::TilesRendered()) / std::max(frames, 1), DS::Film::kTiles * DS::Film::kTiles);
+    if (mode2) mode2->Stop(&host2, DripSim::StopReason::Requested);
     mode->Stop(&host, DripSim::StopReason::Requested);
     return 0;
 }

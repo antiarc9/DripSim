@@ -845,5 +845,5 @@ namespace DS::Core
 // The framework's entry point for mode plugins (see api/DripSimMode.h: DripSim::RequestAPI).
 extern "C" __declspec(dllexport) void* DripSimRequestAPI(std::uint32_t version)
 {
-    return version == DripSim::kApiVersion ? static_cast<void*>(DS::Core::Api()) : nullptr;
+    return version >= DripSim::kApiVersionMin && version <= DripSim::kApiVersion ? static_cast<void*>(DS::Core::Api()) : nullptr;
 }

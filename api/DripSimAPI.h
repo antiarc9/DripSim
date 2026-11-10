@@ -2,7 +2,7 @@
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #pragma once
 
-// DripSim framework API (version 3: ILayer::SetWetFilm; version 2: IWorld::WaterDepth / IsSwimming). A "mode" is a separate SKSE plugin that simulates one kind of fluid on the player's skin
+// DripSim framework API (version 4: IWorld::Exertion; version 3: ILayer::SetWetFilm; version 2: IWorld::WaterDepth / IsSwimming). A "mode" is a separate SKSE plugin that simulates one kind of fluid on the player's skin
 // (rain water, ...) and draws it into a film layer that the framework composites onto one overlay texture.
 //
 // How a mode plugin connects (see DripSimMode.h): at kPostLoad it calls DripSim::RequestAPI(), gets an IDripSim*, and registers
@@ -16,7 +16,8 @@
 
 namespace DripSim
 {
-    constexpr std::uint32_t kApiVersion = 3;
+    constexpr std::uint32_t kApiVersion = 4;
+    constexpr std::uint32_t kApiVersionMin = 3;  // the framework also serves modes built against these older versions (new functions are only ever added at the end)
     constexpr const char* kFrameworkModule = "DripSim.dll";
 
     // What the framework knows about the surface at a pixel of the body's UV atlas (1024 x 1024, x right, y down).
@@ -105,6 +106,9 @@ namespace DripSim
         // API 2: water the player stands or swims in
         virtual float WaterDepth() const = 0;  // game units of water above the player's feet (0 = dry): wading ~20-60, swimming 100+ (70 units = 1 m)
         virtual bool IsSwimming() const = 0;
+        // API 4: how hard the player works right now, 0 resting .. 1 sprinting or fighting flat out (sprint, running, a melee swing, a drawn bow, low stamina after effort).
+        // It is the instant value: a mode that follows how hot the body is keeps its own slowly moving sum of it.
+        virtual float Exertion() const = 0;
     };
 
     // Skin surfaces a mode may ask for (body, hands, feet, face/head) (IMode::Surfaces is a mask of these). Each has its own UV atlas, field, film layer and texture.

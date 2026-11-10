@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(DripSim VERSION 1.1.0 LANGUAGES CXX)
+project(DripSim VERSION 1.2.0 LANGUAGES CXX)
 
 # CommonLibSSE-NG 7.2.0, the same release DazPoser builds against (copied into lib/).
 set(BUILD_TESTS OFF CACHE BOOL "Disable CommonLibSSE tests" FORCE)
@@ -37,6 +37,7 @@ add_commonlibsse_plugin(DripSimRain
         src/rain/RainMain.cpp
         src/rain/RainMode.cpp
 )
+
 
 set(DRIPSIM_TARGETS DripSim DripSimRain)
 foreach(target ${DRIPSIM_TARGETS})
