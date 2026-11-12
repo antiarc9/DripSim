@@ -2,7 +2,7 @@
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #pragma once
 
-// DripSim framework API (version 4: IWorld::Exertion; version 3: ILayer::SetWetFilm; version 2: IWorld::WaterDepth / IsSwimming). A "mode" is a separate SKSE plugin that simulates one kind of fluid on the player's skin
+// DripSim framework API (version 5: IHost::SurfaceRaycast / SurfaceBounds; version 4: IWorld::Exertion; version 3: ILayer::SetWetFilm; version 2: IWorld::WaterDepth / IsSwimming). A "mode" is a separate SKSE plugin that simulates one kind of fluid on the player's skin
 // (rain water, ...) and draws it into a film layer that the framework composites onto one overlay texture.
 //
 // How a mode plugin connects (see DripSimMode.h): at kPostLoad it calls DripSim::RequestAPI(), gets an IDripSim*, and registers
@@ -16,7 +16,7 @@
 
 namespace DripSim
 {
-    constexpr std::uint32_t kApiVersion = 4;
+    constexpr std::uint32_t kApiVersion = 5;
     constexpr std::uint32_t kApiVersionMin = 3;  // the framework also serves modes built against these older versions (new functions are only ever added at the end)
     constexpr const char* kFrameworkModule = "DripSim.dll";
 
@@ -145,6 +145,10 @@ namespace DripSim
         // Added 2026-10-15. Both use the live skinned body (surface 0).
         virtual bool Raycast(const float from[3], const float dir[3], float maxDist, Hit* out) const = 0;  // nearest hit of the segment, false when it misses
         virtual bool BodyBounds(float lo[3], float hi[3]) const = 0;                                      // world bounding box of the body skin
+        // API 5: the same on any surface this run got (index 0 .. SurfaceCount() - 1; 0 = the body, as Raycast / BodyBounds): the face, the hands, ...
+        // Hit.x / y are pixels of that surface's atlas.
+        virtual bool SurfaceRaycast(std::int32_t index, const float from[3], const float dir[3], float maxDist, Hit* out) const = 0;
+        virtual bool SurfaceBounds(std::int32_t index, float lo[3], float hi[3]) const = 0;
     };
 
     enum class StopReason : std::int32_t

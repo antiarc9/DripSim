@@ -218,7 +218,7 @@ namespace DS::Field
             td.rest = std::sqrt(std::clamp(1.0f - td.n[2] * td.n[2], 0.0f, 1.0f));
             const float area3 = 0.5f * nl;
             const float areaPx = 0.5f * std::fabs(det);
-            td.mmpx = std::clamp(kUnitMm * std::sqrt(area3 / areaPx), 0.8f, 4.0f);
+            td.mmpx = std::clamp(kUnitMm * std::sqrt(area3 / areaPx), 0.1f, 6.0f);  // (was 0.8 .. 4: the face is finer than 0.8 mm per pixel, so everything sized in mm came out too small there)
             float j0[3];
             float j1[3];
             for (int k = 0; k < 3; ++k) {

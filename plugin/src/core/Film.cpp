@@ -525,9 +525,14 @@ namespace DS::Film
                     aBody = std::min(look.bodyAlpha * (1.0f + 1.4f * look.shade * away), 1.0f) * (1.0f - std::exp(-v / look.hole));
                 }
                 const float lap = (hn(x - 1, y, v) + hn(x + 1, y, v) + hn(x, y - 1, v) + hn(x, y + 1, v) - 4.0f * v) * kScaleF * kScaleF;  // < 0 on a bulge (per sim pixel squared)
-                const float glint = std::clamp(-lap * 7.0f, 0.0f, 1.0f) * (0.4f + 0.6f * lit) * look.glint * (look.creamStart <= 0.0f ? 0.3f : 1.0f);  // (water: the sharp highlight comes from the dome shading below)
+                // cream: thin parts (an old streak, a neck of a strand) are a see-through film, so their edges and bulges must not light up white;
+                // rim and glint come in with the thickness, fully where the opaque body is
+                const float creamBody = look.creamStart > 0.0f ? std::clamp(v / (look.creamStart + 0.35f), 0.0f, 1.0f) : 1.0f;
+                const float glint = std::clamp(-lap * 7.0f, 0.0f, 1.0f) * (0.4f + 0.6f * lit) * look.glint * (look.creamStart <= 0.0f ? 0.3f : creamBody);  // (water: the sharp highlight comes from the dome shading below)
                 const float facing = (1.0f - look.rimDirection) * (0.45f + 0.55f * lit) + look.rimDirection * (0.05f + 0.95f * lit * lit);  // the crescent facing the light
-                const float rimBase = std::min(std::clamp(gm * (5.0f + (look.filmAlpha > 0.0f ? 10.0f * std::exp(-4.0f * v) : 0.0f)), 0.0f, 1.0f) * facing * look.rimAlpha, 1.0f) * (0.55f + 0.45f * rimvar);
+                // (the bright edge line of a thin film is a water look: a clear film's meniscus; not for cream)
+                const float thinEdge = look.filmAlpha > 0.0f && look.creamStart <= 0.0f ? 10.0f * std::exp(-4.0f * v) : 0.0f;
+                const float rimBase = std::min(std::clamp(gm * (5.0f + thinEdge), 0.0f, 1.0f) * facing * look.rimAlpha, 1.0f) * (0.55f + 0.45f * rimvar) * creamBody;
                 const float rim = 1.0f - (1.0f - rimBase) * (1.0f - std::min(glint * 0.85f, 0.95f));
                 const float mod = 1.0f + look.mottle * (0.055f * g_mott[gi] + 0.02f * g_grain[gi]);
                 float a = 1.0f - (1.0f - aBody) * (1.0f - rim);

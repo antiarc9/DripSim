@@ -113,6 +113,11 @@ namespace
             return true;
         }
         bool BodyBounds(float lo[3], float hi[3]) const override { return DS::Field::Get(DS::Surface::Body).Bounds(lo, hi); }
+        bool SurfaceRaycast(std::int32_t index, const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const override
+        {
+            return index == 0 && Raycast(from, dir, maxDist, out);  // the preview has the body only
+        }
+        bool SurfaceBounds(std::int32_t index, float lo[3], float hi[3]) const override { return index == 0 && BodyBounds(lo, hi); }
         DripSim::ILayer* Layer() override { return m_layer; }
         const DripSim::IField* Field() const override { return m_field; }
         const DripSim::IWorld* World() const override { return m_world; }

@@ -82,8 +82,11 @@ namespace
         const DripSim::IField* SurfaceField(std::int32_t index) const override;
         bool Raycast(const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const override;
         bool BodyBounds(float lo[3], float hi[3]) const override { return DS::Field::Get(DS::Surface::Body).Bounds(lo, hi); }
+        bool SurfaceRaycast(std::int32_t index, const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const override;
+        bool SurfaceBounds(std::int32_t index, float lo[3], float hi[3]) const override;
 
     private:
+        int SurfaceId(std::int32_t index) const;  // DS::Surface id of a run's surface index, -1 when out of range
         Entry* m_entry;
     };
 
@@ -117,8 +120,25 @@ namespace
 
     bool Host::Raycast(const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const
     {
+        return SurfaceRaycast(0, from, dir, maxDist, out);
+    }
+
+    int Host::SurfaceId(std::int32_t index) const
+    {
+        return index >= 0 && index < SurfaceCount() ? m_entry->surfaces[static_cast<std::size_t>(index)] : -1;
+    }
+
+    bool Host::SurfaceBounds(std::int32_t index, float lo[3], float hi[3]) const
+    {
+        const int id = SurfaceId(index);
+        return id >= 0 && DS::Field::Get(id).Bounds(lo, hi);
+    }
+
+    bool Host::SurfaceRaycast(std::int32_t index, const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const
+    {
+        const int id = SurfaceId(index);
         DS::Field::RayHit hit;
-        if (!out || !DS::Field::Get(DS::Surface::Body).Raycast(from, dir, maxDist, &hit)) return false;
+        if (!out || id < 0 || !DS::Field::Get(id).Raycast(from, dir, maxDist, &hit)) return false;
         out->x = hit.x;
         out->y = hit.y;
         out->tx = hit.tx;

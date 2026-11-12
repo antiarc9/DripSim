@@ -5,11 +5,13 @@ Water on the skin of your character in Skyrim Special Edition. The drops merge i
 DripSim is an SKSE plugin. `DripSim.dll` is the framework (body capture, gravity field, the film that is drawn on the skin). `DripSimRain.dll` is the rain mode, `DripSimCream.dll` the cream mode. Other effects can be added as small modes against `api/DripSimAPI.h`.
 
 ## Cream mode
-A thick, opaque, slightly warm white fluid on the player's skin (face and body; hands and feet optional): irregular blobs that flow together, creep slowly down the live pose leaving permanent streaks that end in hanging bulbs, with a soft satin gloss. It does not dry; it stays for `StayTime` seconds and then fades out.
-- Keys (`Data\SKSE\Plugins\DripSimCream.ini`): `KeySplash=Shift+C` (3-5 big globs on the face or the upper front of the torso: splayed out by the impact, they change only a little for a few seconds, then creep down), `KeyPour=Shift+V` (poured from above), `KeyClean=Ctrl+Shift+C` (wipes it off)
+A thick, opaque, slightly warm white fluid on the player's skin (face and body; hands and feet optional). A shot is a few strands from a source in front of the target and below it; each strand is cast against the real, posed skin (needs API 5: `IHost::SurfaceRaycast`), so it lands as a compact blob, an arc or a short thread across depending on how it flew. Where it is thickest, blobs gather; after a short hold they creep down the live pose, leaving a streak as wide as themselves that thins out with age. It does not dry; it stays for `StayTime` seconds and then fades out.
+- Keys (`Data\SKSE\Plugins\DripSimCream.ini`): `KeySplash=Shift+C` (a shot at the face or the upper torso), `KeyPour=Shift+V` (poured from above), `KeyClean=Ctrl+Shift+C` (wipes it off)
 - Mod event: `akRef.SendModEvent("DripSim_Cream", "splash" | "pour" | "clean", strength 0..1)`
-- Look and flow: `Size`, `Viscosity`, `Opacity`, `Gloss`, `Sheen`, `Shininess`, `Shade`, `NormalStrength`, `Color=246,243,234`, `WarmColor=241,229,192`, `Warmth`, `Clearing`, `ClearTime`; amounts: `GlobsMin`, `GlobsMax`, `GlobSize`, `FaceSize`, `SplashSpread`, `SpreadTime`, `HoldTime`, `HoldSpread`, `HoldSag`, `Spread`, `FingersMin`, `FingersMax`, `FingerLength`, `FingerWidth`, `Spatters`, `PourRate`, `PourTime`, `PourSpread`, `FaceShare`, `AimHeight`, `AimSpread`; `StayTime`, `FadeTime`, `MaxBlobs`, `MaxRunners`, `Face`, `Hands`, `Feet`, `DripBody`, `DripHands`, `DripFeet`, `DripFace`
-- Preview: `DripSimPreview --mode cream --variant 2 --at 1,4,10,20` (variant 1 = splash, 2 = pour)
+- Shot: `StrandsMin`, `StrandsMax`, `StrandInterval`, `StrandLength` (cm), `StrandWidth` (mm), `Unevenness`, `BlobShare`, `ShotDistanceMin/Max` (cm), `ShotElevationMin/Max` (degrees), `ShotSide` (degrees), `Sweep`, `FaceShare`, `AimHeight`, `HoldTime`
+- Streaks: `TrailFade`, `TrailFloor`; flow: `Size`, `Viscosity`, `DripBody`, `DripHands`, `DripFeet`, `DripFace`, `MaxBlobs`, `MaxRunners`
+- Look: `Opacity`, `Gloss`, `Sheen`, `Shininess`, `Shade`, `NormalStrength`, `Color=246,243,234`, `WarmColor=241,229,192`, `Warmth`, `Clearing`, `ClearTime`; `StayTime`, `FadeTime`; pour: `PourRate`, `PourTime`, `PourSpread`; skin parts: `Face`, `Hands`, `Feet`
+- Preview: `DripSimPreview --mode cream --variant 2 --at 1,4,10,20` (variant 1 = shot at the torso, 2 = pour; the preview has the body only)
 
 ## Requirements (to play)
 - Skyrim Special Edition 1.5.97 (the only version tested so far)
