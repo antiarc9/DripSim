@@ -3,6 +3,7 @@
 #include "Spike.h"
 
 #include "Body.h"
+#include "LogLimit.h"
 
 // Capture of a skin surface (see Body.h). The vertex layout is decoded from the vertex description, so any skinned layout that carries position,
 // UV and skin weights works (body: stride 32, feet: stride 40 with normals and tangents); several skin partitions are merged through their vertex maps.
@@ -181,7 +182,7 @@ namespace
                 return;
             }
             std::memcpy(&parts[p].desc, &buffers->vertexDesc, std::min(sizeof parts[p].desc, sizeof buffers->vertexDesc));
-            logger::info("Capture {}: partition {}: vertices={} triangles={} bones={} perVertex={} vertexBytes={} indexBytes={} desc={:#x}", label, p, part.vertices, part.triangles,
+            if (DS::LogAllow("capture-partition")) logger::info("Capture {}: partition {}: vertices={} triangles={} bones={} perVertex={} vertexBytes={} indexBytes={} desc={:#x}", label, p, part.vertices, part.triangles,
                 part.numBones, part.bonesPerVertex, parts[p].vertices.size(), parts[p].indices.size(), parts[p].desc);
         }
         if (writeFile && surface == DS::Surface::Body) WriteDump(geometry, skin, skinData, partition, parts);
@@ -192,6 +193,8 @@ namespace
         body->shape.reset(geometry);
         body->vertexCount = partition->vertexCount;
         body->boneCount = skinData->GetBoneCount();
+        body->boneRefs.reserve(body->boneCount);
+        for (std::uint32_t i = 0; i < body->boneCount; ++i) body->boneRefs.emplace_back(skin->bones[i]);  // a reference each (see Body.h)
         const std::size_t nv = body->vertexCount;
         body->position.assign(nv * 3, 0.0f);
         body->uv.assign(nv * 2, 0.0f);
@@ -267,7 +270,7 @@ namespace
                 for (int c = 0; c < 3; ++c) body->skinToBoneRotation[static_cast<std::size_t>(b) * 9 + static_cast<std::size_t>(r * 3 + c)] = rotate.entry[r][c];
             }
         }
-        logger::info("Capture {}: shape '{}' {} vertices, {} triangles, {} bones, {} partitions", label, geometry->name.c_str(), body->vertexCount, body->triangleCount, body->boneCount,
+        if (DS::LogAllow("capture-shape")) logger::info("Capture {}: shape '{}' {} vertices, {} triangles, {} bones, {} partitions", label, geometry->name.c_str(), body->vertexCount, body->triangleCount, body->boneCount,
             partition->numPartitions);
         std::scoped_lock lock(g_mutex);
         g_static[static_cast<std::size_t>(surface)] = std::move(body);
@@ -296,7 +299,7 @@ namespace DS::Body
         std::scoped_lock lock(g_mutex);
         g_pending[static_cast<std::size_t>(surface)].geometry.reset(geometry);
         g_pending[static_cast<std::size_t>(surface)].file = writeFile;
-        logger::info("Capture {}: requested from '{}'", DS::Surface::Name(surface), geometry->name.c_str());
+        if (DS::LogAllow("capture-request")) logger::info("Capture {}: requested from '{}'", DS::Surface::Name(surface), geometry->name.c_str());
     }
 }
 

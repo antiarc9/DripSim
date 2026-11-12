@@ -2,6 +2,7 @@
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #include "Field.h"
 
+#include <algorithm>
 #include <unordered_map>
 
 // Gravity per triangle from the live skeleton:
@@ -23,6 +24,7 @@ namespace
         std::vector<std::int32_t> triId;
         std::vector<std::int32_t> padTri;
         std::vector<std::int16_t> smooth;
+        std::vector<std::int32_t> twin;
         std::vector<std::uint8_t> inner;
         std::vector<std::uint8_t> keep;
         std::vector<TriStatic> tri;
@@ -155,6 +157,89 @@ namespace DS::Field
         }
     }
 
+    // Across the UV seams: every skin pixel within a few pixels of an island edge gets its rest-pose position (barycentric over its triangle); a pixel whose nearest
+    // edge pixel in 3D lies far away in the atlas (another island, or the far side of a cut in the same one) is its twin. Open edges (the neck hole) find nothing close.
+    void BuildTwins(const DS::Body::Static& b, const std::vector<std::int32_t>& triId, const std::vector<std::uint8_t>& inner, std::vector<std::int32_t>& twin)
+    {
+        const int n = DS::Field::kSize;
+        const auto size = static_cast<float>(n);
+        twin.assign(triId.size(), -1);
+        struct Edge
+        {
+            float p[3];
+            std::int32_t pixel;
+        };
+        std::vector<Edge> edge;
+        for (int y = 0; y < n; ++y) {
+            for (int x = 0; x < n; ++x) {
+                const auto i = Index(x, y);
+                const auto t = triId[i];
+                if (t < 0 || inner[i]) continue;
+                const std::uint32_t v[3] = { b.triangle[static_cast<std::uint32_t>(t) * 3], b.triangle[static_cast<std::uint32_t>(t) * 3 + 1], b.triangle[static_cast<std::uint32_t>(t) * 3 + 2] };
+                float px[3];
+                float py[3];
+                for (int k = 0; k < 3; ++k) {
+                    px[k] = b.uv[static_cast<std::size_t>(v[k]) * 2] * size;
+                    py[k] = b.uv[static_cast<std::size_t>(v[k]) * 2 + 1] * size;
+                }
+                const float denom = (py[1] - py[2]) * (px[0] - px[2]) + (px[2] - px[1]) * (py[0] - py[2]);
+                if (std::fabs(denom) < 1e-9f) continue;
+                const float fx = static_cast<float>(x) + 0.5f;
+                const float fy = static_cast<float>(y) + 0.5f;
+                float w[3];
+                w[0] = std::clamp(((py[1] - py[2]) * (fx - px[2]) + (px[2] - px[1]) * (fy - py[2])) / denom, 0.0f, 1.0f);
+                w[1] = std::clamp(((py[2] - py[0]) * (fx - px[2]) + (px[0] - px[2]) * (fy - py[2])) / denom, 0.0f, 1.0f);
+                w[2] = std::max(1.0f - w[0] - w[1], 0.0f);
+                Edge e{};
+                for (int k = 0; k < 3; ++k) {
+                    for (int c = 0; c < 3; ++c) e.p[c] += w[k] * b.position[static_cast<std::size_t>(v[k]) * 3 + static_cast<std::size_t>(c)];
+                }
+                e.pixel = static_cast<std::int32_t>(i);
+                edge.push_back(e);
+            }
+        }
+        constexpr float kCell = 0.25f;   // game units (~3 mm)
+        constexpr float kMatch = 0.45f;  // the most a twin may be away in 3D (both sides of a seam stop a pixel or two short of it)
+        constexpr int kFar = 8;          // pixels: closer than this in the atlas is the same side
+        const auto cellOf = [](float v) { return static_cast<std::int64_t>(std::floor(v / kCell)); };
+        const auto key = [](std::int64_t a, std::int64_t c, std::int64_t d) { return static_cast<std::uint64_t>((a & 0x1FFFFF) | ((c & 0x1FFFFF) << 21) | ((d & 0x1FFFFF) << 42)); };
+        std::unordered_map<std::uint64_t, std::vector<std::int32_t>> grid;
+        grid.reserve(edge.size());
+        for (std::size_t k = 0; k < edge.size(); ++k) grid[key(cellOf(edge[k].p[0]), cellOf(edge[k].p[1]), cellOf(edge[k].p[2]))].push_back(static_cast<std::int32_t>(k));
+        for (const auto& e : edge) {
+            const int ex = e.pixel % n;
+            const int ey = e.pixel / n;
+            float best = kMatch * kMatch;
+            std::int32_t found = -1;
+            const auto cx = cellOf(e.p[0]);
+            const auto cy = cellOf(e.p[1]);
+            const auto cz = cellOf(e.p[2]);
+            for (std::int64_t a = cx - 2; a <= cx + 2; ++a) {
+                for (std::int64_t c = cy - 2; c <= cy + 2; ++c) {
+                    for (std::int64_t d = cz - 2; d <= cz + 2; ++d) {
+                        const auto it = grid.find(key(a, c, d));
+                        if (it == grid.end()) continue;
+                        for (const auto k : it->second) {
+                            const auto& o = edge[static_cast<std::size_t>(k)];
+                            const int ox = o.pixel % n;
+                            const int oy = o.pixel / n;
+                            if (std::abs(ox - ex) < kFar && std::abs(oy - ey) < kFar) continue;
+                            const float dx = o.p[0] - e.p[0];
+                            const float dy = o.p[1] - e.p[1];
+                            const float dz = o.p[2] - e.p[2];
+                            const float d2 = dx * dx + dy * dy + dz * dz;
+                            if (d2 < best) {
+                                best = d2;
+                                found = o.pixel;
+                            }
+                        }
+                    }
+                }
+            }
+            twin[static_cast<std::size_t>(e.pixel)] = found;
+        }
+    }
+
     bool Instance::Build(std::shared_ptr<const Body::Static> bodyPtr)
     {
         if (!bodyPtr || bodyPtr->triangleCount == 0) return false;
@@ -247,6 +332,7 @@ namespace DS::Field
         s.inner = covered;
         for (int i = 0; i < 3; ++i) Morph(s.inner, true, nullptr);
         s.keep = s.inner;
+        BuildTwins(b, s.triId, s.inner, s.twin);
         for (int i = 0; i < 2; ++i) Morph(s.keep, false, &covered);
         s.boneG.assign(static_cast<std::size_t>(b.boneCount) * 3, 0.0f);
         s.ready = true;
@@ -254,6 +340,7 @@ namespace DS::Field
         m_triId = std::move(s.triId);
         m_padTri = std::move(s.padTri);
         m_smooth = std::move(s.smooth);
+        m_twin = std::move(s.twin);
         m_inner = std::move(s.inner);
         m_keep = std::move(s.keep);
         m_tri = std::move(s.tri);
@@ -265,7 +352,8 @@ namespace DS::Field
         m_attached = true;
         m_attachChecked = std::chrono::steady_clock::now();
         m_loggedBones = false;
-        logger::info("Field {}: built {} triangles, z {:.1f}..{:.1f}", DS::Surface::Name(m_body->surface), m_tri.size(), m_zMin, m_zMax);
+        const auto twins = std::ranges::count_if(m_twin, [](std::int32_t t) { return t >= 0; });
+        logger::info("Field {}: built {} triangles, z {:.1f}..{:.1f}, {} edge pixels with a twin across a seam", DS::Surface::Name(m_body->surface), m_tri.size(), m_zMin, m_zMax, twins);
         return true;
     }
 
@@ -309,11 +397,11 @@ namespace DS::Field
         std::copy(b.position.begin(), b.position.begin() + static_cast<std::ptrdiff_t>(m_world.size()), m_world.begin());
 #else
         auto* skin = b.shape ? b.shape->GetGeometryRuntimeData().skinInstance.get() : nullptr;
-        if (!skin || !skin->bones || b.skinToBoneTranslate.size() < static_cast<std::size_t>(b.boneCount) * 3) return false;
+        if (!skin || b.boneRefs.size() < b.boneCount || b.skinToBoneTranslate.size() < static_cast<std::size_t>(b.boneCount) * 3) return false;
         // per bone: world position = R * (s * p) + T with R = boneWorld.R * skinToBone.R, s = both scales, T = boneWorld.R * (boneWorld.s * skinToBone.T) + boneWorld.T
         std::vector<float> palette(static_cast<std::size_t>(b.boneCount) * 13, 0.0f);
         for (std::uint32_t i = 0; i < b.boneCount; ++i) {
-            auto* bone = skin->bones[i];
+            auto* bone = b.boneRefs[i].get();  // our own reference: never a freed bone
             if (!bone) continue;
             const auto& w = bone->world;
             const float* sr = &b.skinToBoneRotation[static_cast<std::size_t>(i) * 9];
@@ -479,9 +567,9 @@ namespace DS::Field
         }
 #else
         auto* skin = b.shape->GetGeometryRuntimeData().skinInstance.get();
-        if (!skin || !skin->bones) return;
+        if (!skin || b.boneRefs.size() < b.boneCount) return;
         for (std::uint32_t i = 0; i < b.boneCount; ++i) {
-            auto* bone = skin->bones[i];
+            auto* bone = b.boneRefs[i].get();
             float g[3] = { 0, 0, -1 };
             if (bone) {
                 const auto& w = bone->world.rotate.entry;
@@ -491,11 +579,19 @@ namespace DS::Field
             }
             std::memcpy(&m_boneG[static_cast<std::size_t>(i) * 3], g, sizeof g);
         }
-        if (!m_loggedBones) {  // once per build: each bone's world-down in skin space (an upright body part should be near (0,0,-1))
+        bool logBones = false;
+        static bool s_loggedOnce[DS::Surface::Count] = {};
+        if (!m_loggedBones) {  // each bone's world-down in skin space (an upright body part should be near (0,0,-1)): once per build, and only once per game session
             m_loggedBones = true;
+            if (b.surface >= 0 && b.surface < DS::Surface::Count && !s_loggedOnce[b.surface]) {
+                s_loggedOnce[b.surface] = true;
+                logBones = true;
+            }
+        }
+        if (logBones) {
             std::string text;
             for (std::uint32_t i = 0; i < b.boneCount && i < 24; ++i) {
-                auto* bone = skin->bones[i];
+                auto* bone = b.boneRefs[i].get();
                 text += std::format("\n    [{}] {} ({:.2f}, {:.2f}, {:.2f})", i, bone && bone->name.c_str() ? bone->name.c_str() : "?", m_boneG[i * 3], m_boneG[i * 3 + 1], m_boneG[i * 3 + 2]);
             }
             logger::info("Field {}: bone gravity (world down in skin space):{}", DS::Surface::Name(b.surface), text);
@@ -538,6 +634,11 @@ namespace DS::Field
     std::int32_t Instance::TriAt(int x, int y) const
     {
         return m_ready && InRaster(x, y) ? m_triId[Index(x, y)] : -1;
+    }
+
+    std::int32_t Instance::SeamTwin(int x, int y) const
+    {
+        return m_ready && InRaster(x, y) && !m_twin.empty() ? m_twin[Index(x, y)] : -1;
     }
 
     bool Instance::Inner(int x, int y) const

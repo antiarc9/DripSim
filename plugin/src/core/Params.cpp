@@ -22,6 +22,12 @@ namespace DS::Params
         Values values;
         values.enabled = ini.Bool("Enabled", true);
         values.normalMaps = ini.Bool("NormalMaps", false);
+        values.specMaps = ini.Bool("SpecMaps", true);
+        values.debugKeys = ini.Bool("DebugKeys", false);
+        values.hotkeys = ini.Bool("Hotkeys", false);
+        values.autoReport = ini.Bool("AutoReport", true);
+        values.premultiplied = ini.Bool("PremultipliedAlpha", false);
+        values.overlayDecal = ini.Bool("OverlayDecal", false);
         values.donor = ini.Bool("DonorTextures", false);
         values.perfLog = ini.Bool("PerfLog", false);
         values.refraction = ini.Float("Refraction", 0.0f);

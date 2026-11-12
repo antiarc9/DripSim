@@ -103,7 +103,7 @@ namespace DS::Spike
             MainUpdateHook::thunk);
         InstallTextureHook();
         static_cast<RE::BSTEventSource<RE::InputEvent*>*>(manager)->AddEventSink(std::addressof(Sink::Get()));
-        logger::info("Hooks and key sink installed; debug keys: Ctrl+H, Ctrl+Shift+H, Ctrl+Shift+G, F10");
+        logger::info("Hooks and key sink installed; F10 reloads the settings (debug keys Ctrl+H, Ctrl+Shift+H, Ctrl+Shift+G only with DebugKeys=1)");
     }
 
     void DumpPlayerShapes()

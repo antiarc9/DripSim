@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #include "RainMode.h"
+#include "LogLimit.h"
 
 #include <atomic>
 
@@ -48,6 +49,16 @@ namespace
         float soakSize = 1.5f;       // bead size relative to rain
         bool soakFilm = true;        // a thin clear film of water over the soaked skin (the wet sheen); false = only drops
         float soakDry = 90.0f;       // seconds the beads take to dry (instead of DryTime) after a soak
+        // the look of a soak is its own (Soak* keys): rain and soak do not share Wet / Gloss / Opacity / NormalStrength / Sheen / Shininess. A missing key falls back to the rain value.
+        float soakWet = 1.0f;
+        float soakGloss = 1.5f;
+        float soakOpacity = 0.6f;
+        float soakNormals = 1.5f;
+        float soakSheen = 2.0f;
+        float soakShininess = 130.0f;
+        float sheenAlpha = 1.0f;  // the sheet as a wet sheen: most opacity, normal-map bend, colour (0 = the wet-skin halo colour .. 1 = the bright rim colour)
+        float sheenBump = 2.0f;
+        float sheenTint = 0.0f;
     };
     Settings g_cfg;
     DripSim::IHost* g_host = nullptr;
@@ -86,8 +97,17 @@ namespace
         v.soakSize = ini.Float("SoakSize", 1.5f);
         v.soakDry = ini.Float("SoakDryTime", 90.0f);
         v.soakFilm = ini.Bool("SoakFilm", true);
+        v.soakWet = ini.Float("SoakWet", v.wet);
+        v.soakGloss = ini.Float("SoakGloss", v.gloss);
+        v.soakOpacity = ini.Float("SoakOpacity", v.opacity);
+        v.soakNormals = ini.Float("SoakNormalStrength", v.normals);
+        v.soakSheen = ini.Float("SoakSheen", v.sheen);
+        v.soakShininess = ini.Float("SoakShininess", v.shininess);
+        v.sheenAlpha = ini.Float("SoakSheenAlpha", 1.0f);
+        v.sheenBump = ini.Float("SoakSheenBump", 2.0f);
+        v.sheenTint = ini.Float("SoakSheenTint", 0.0f);
         g_cfg = v;
-        logger::info("Rain: settings: auto {} rate {:.0f}/s size {:.2f} wet {:.2f} gloss {:.2f} opacity {:.2f} dry {:.0f}s forced {:.2f} maxBeads {} needSky {}", v.autoStart, v.rate, v.size, v.wet,
+        if (DS::LogAllow("rain-settings")) logger::info("Rain: settings: auto {} rate {:.0f}/s size {:.2f} wet {:.2f} gloss {:.2f} opacity {:.2f} dry {:.0f}s forced {:.2f} maxBeads {} needSky {}", v.autoStart, v.rate, v.size, v.wet,
             v.gloss, v.opacity, v.dryTime, v.forced, v.maxBeads, v.needSky);
     }
 
@@ -135,31 +155,41 @@ namespace
 
     // Clear water: almost no body of its own (you see the skin through it), a thin bright rim, small glints, a dark side (shade) and the skin
     // darkened around it by wetness. Opaque white would read as milk.
-    void ApplyLook()
+    void ApplyLook(bool soak)
     {
         DripSim::Look look{};
-        const float body[3] = { 140, 160, 178 };
-        const float rim[3] = { 175, 190, 205 };
+        const float body[3] = { 235, 205, 180 };  // warm: on skin the water shows the skin, brighter
+        const float rim[3] = { 230, 212, 198 };
         const float halo[3] = { 22, 16, 12 };
         for (int i = 0; i < 3; ++i) {
             look.bodyColor[i] = body[i];
             look.rimColor[i] = rim[i];
             look.haloColor[i] = halo[i];
         }
-        look.bodyAlpha = std::min(0.03f * g_cfg.opacity, 1.0f);
+        // soak: the soak has its own look values (Soak* keys)
+        const float wet = soak ? g_cfg.soakWet : g_cfg.wet;
+        const float gloss = soak ? g_cfg.soakGloss : g_cfg.gloss;
+        const float opacity = soak ? g_cfg.soakOpacity : g_cfg.opacity;
+        const float normals = soak ? g_cfg.soakNormals : g_cfg.normals;
+        const float sheen = soak ? g_cfg.soakSheen : g_cfg.sheen;
+        const float shininess = soak ? g_cfg.soakShininess : g_cfg.shininess;
+        look.bodyAlpha = std::min(0.03f * opacity, 1.0f);
         look.rimAlpha = 0.06f;  // only a faint edge: the look of a drop is its shadow side and one small highlight (Film.cpp), not a white ring
         look.rimDirection = 0.9f;
-        look.haloAlpha = std::min(0.38f * g_cfg.wet, 1.0f);
+        look.haloAlpha = std::min(0.38f * wet, 1.0f);
         look.hole = 0.35f;
-        look.glint = g_cfg.gloss;
+        look.glint = gloss;
         look.filmAlpha = g_cfg.soakFilm ? 0.07f : 0.0f;  // the thin water film (soak): a faint opacity in the wet-skin colour; it carries the skin's gloss between the drops
         look.mottle = 0.0f;
         look.brightness = 1.0f;
         look.shade = 1.1f;  // a dark far side, but see-through
-        look.specPower = g_cfg.sheen > 0.0f ? g_cfg.shininess : 0.0f;
-        look.specScale = 2.0f * g_cfg.sheen;
-        look.normalStrength = g_cfg.normals;
-        for (auto& surf : g_surfs) surf.layer->SetLook(&look);
+        look.specPower = sheen > 0.0f ? shininess : 0.0f;
+        look.specScale = 2.0f * sheen;
+        look.normalStrength = normals;
+        for (auto& surf : g_surfs) {
+            surf.layer->SetLook(&look);
+            surf.layer->SetFlowLook(g_cfg.sheenAlpha, g_cfg.sheenBump, g_cfg.sheenTint);  // the soak's draining sheet: a smooth wet sheen (Film.cpp), not drops
+        }
     }
 
     struct State
@@ -173,6 +203,7 @@ namespace
         float soakStart = 0;   // its strength when it began (sets how long it lasts)
         float film = 0;        // strength of the wet film (0..1) the last soak left: it holds while the soak runs, then dries away over soakDry
         float soakDepth = 0;   // game units of water the skin was in: only skin below this height gets wet
+        bool soakLook = false; // the layer shows the soak look (set when a soak begins, cleared when its water has dried), not the rain look
         float spawnAcc = 0;
         float soakAcc = 0;
         float checkAcc = 0;    // time since the beads were last re-checked for sliding
@@ -371,6 +402,7 @@ namespace
         g_s.wetness = std::max(g_s.wetness, g_s.soak);
         g_s.film = std::max(g_s.film, strength);
         g_s.dryFor = 0;
+        g_s.soakLook = true;
         const int burst = static_cast<int>(static_cast<float>(g_cfg.soakBurst) * strength * (1.0f - 0.5f * before));
         SoakDrops(burst);
         logger::info("Rain: soak {:.2f} (water to {:.0f} units): {} drops at once", g_s.soak, depth, burst);
@@ -459,7 +491,7 @@ namespace
         r.run += stepMm;
         r.vol -= 0.014f * stepMm * (1.2f - 0.6f * g_s.rain);  // water stays behind on the skin (less in a downpour: the rivulets reach further)
         // a thin wet trail: stamped now, faded out later (two steps)
-        const float tr = std::max(0.42f / s.mmpx, 0.7f);
+        const float tr = std::max(0.55f / s.mmpx, 0.9f);  // (a wider trail: a hairline looked like a string)
         // stamped along the whole step (a stamp every half radius) so the trail is one continuous line, not a row of dots
         const float stepPx = stepMm / s.mmpx;
         const int pieces = std::max(1, static_cast<int>(std::ceil(stepPx / (0.5f * tr))));
@@ -553,10 +585,10 @@ namespace
             g_s.forced = variant == 1;
             g_rng.seed(std::random_device{}());
             g_bodyZMin = host->Field() ? host->Field()->ZMin() : 0.0f;
-            ApplyLook();
+            ApplyLook(g_s.soakLook);
             if (variant == 2) TakeRequest();  // started by a soak: the water that was asked for lands at once
-            logger::info("Rain: surfaces {}", names);
-            logger::info("Rain: weather '{}' intensity {:.2f}{}", g_world->WeatherName(), g_world->RainIntensity(), g_s.forced ? " (forced mode ignores it)" : "");
+            if (DS::LogAllow("rain-surfaces")) logger::info("Rain: surfaces {}", names);
+            if (DS::LogAllow("rain-weather")) logger::info("Rain: weather '{}' intensity {:.2f}{}", g_world->WeatherName(), g_world->RainIntensity(), g_s.forced ? " (forced mode ignores it)" : "");
             host->Notify(g_s.forced ? "DripSim rain: forced rain on; press the toggle key again to stop" : variant == 2 ? "DripSim water: it runs off your skin" : "DripSim rain: it is raining on you");
             return true;
         }
@@ -565,7 +597,7 @@ namespace
         {
             g_s.t += dt;
             ++g_s.frames;
-            ApplyLook();
+            ApplyLook(g_s.soakLook);
             float rain = 0.0f;
             if (g_s.forced) {
                 rain = g_cfg.forced;
@@ -577,6 +609,7 @@ namespace
             TakeRequest();
             float depth = 0.0f;
             if (g_cfg.autoSoak && WatchWater(g_world, dt, &depth)) BeginSoak(SoakStrength(depth, depth >= 400.0f), depth);
+            if (g_s.soakLook && g_s.soak <= 0.02f && g_s.dryFor > static_cast<double>(g_cfg.soakDry) + 1.0) g_s.soakLook = false;  // all the soak water has dried: the rain look again
             if (g_s.soak > 0.0f) g_s.soak = std::max(0.0f, g_s.soak - dt * g_s.soakStart / std::max(g_cfg.soakTime * (0.4f + 0.6f * g_s.soakStart), 1.0f));
             const float source = rain;
             rain = std::max(rain, g_s.soak * 0.9f);
@@ -597,6 +630,10 @@ namespace
             std::size_t beads = 0;
             std::size_t runners = 0;
             std::size_t trails = 0;
+            double flowMs = 0.0;
+            double flowJobMs = 0.0;
+            float flowWater = 0.0f;
+            bool flowing = false;
             for (auto& surf : g_surfs) {
                 g_cur = &surf;
                 // beads dry out once the rain has stopped, each at its own time
@@ -612,7 +649,12 @@ namespace
                 }
                 if (g_cfg.soakFilm) {  // the even wet sheen of the skin that was under water
                     const float held = g_s.soak > 0.02f ? 1.0f : std::max(0.0f, 1.0f - static_cast<float>(g_s.dryFor) / std::max(g_cfg.soakDry, 1.0f));
-                    g_cur->layer->SetWetFilm(g_bodyZMin + g_s.soakDepth, g_s.film * held);
+                    // (the body's flow sheet is the wet skin there: the full-skin film on top of it only made every tile of the body heavy to render)
+                    const bool sheet = false;  // (the free soak has no sheet)
+                    // the face: no wet tint. Its overlay still z-fights with the head in some triangles (OverlayDecal only made it smaller); with the correct
+                    // (premultiplied) colours the tint darkens the skin, and the hidden triangles showed as patches (game test 2026-11-12). Its wet look is the shine.
+                    const bool face = g_cur->name == "face";
+                    g_cur->layer->SetWetFilm(g_bodyZMin + g_s.soakDepth, sheet || face ? 0.0f : g_s.film * held);
                     if (held <= 0.0f) g_s.film = 0.0f;
                 }
                 if (check) ReleaseHeavyBeads();
@@ -634,15 +676,15 @@ namespace
                 trails += g_cur->trail.size();
             }
 
-            if (!g_s.forced && g_s.dryFor > 1.0 && beads == 0 && runners == 0 && trails == 0 && g_s.film <= 0.0f) host->Finish();
+            if (!g_s.forced && g_s.dryFor > 1.0 && beads == 0 && runners == 0 && trails == 0 && g_s.film <= 0.0f && !flowing) host->Finish();
             if (g_s.frames % 600 == 0) {
-                logger::info("Rain: t={:.0f}s rain {:.2f} wetness {:.2f} beads {} runners {} trail {}", g_s.t, rain, g_s.wetness, beads, runners, trails);
+                logger::info("Rain: t={:.0f}s rain {:.2f} wetness {:.2f} beads {} runners {} trail {} sheet water {:.0f} (main thread {:.2f} ms, worker {:.1f} ms a run)", g_s.t, rain, g_s.wetness, beads, runners, trails, flowWater, flowMs, flowJobMs);
             }
         }
 
         void Stop(DripSim::IHost*, DripSim::StopReason) override
         {
-            logger::info("Rain: stopped after {:.0f} s", g_s.t);
+            if (DS::LogAllow("rain-stopped")) logger::info("Rain: stopped after {:.0f} s", g_s.t);
             g_s = State{};
             g_surfs.clear();
             g_cur = nullptr;

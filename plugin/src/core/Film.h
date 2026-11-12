@@ -29,11 +29,14 @@ namespace DS::Film
         void SetLook(const DripSim::Look* look) override;
         void SetAlpha(float alpha) override;
         void SetWetFilm(float belowZ, float amount) override;
+        void SetFlow(const float* heights, std::int32_t size, const std::uint8_t* changed, std::int32_t tilesPerSide) override;
+        void SetFlowLook(float alpha, float bump, float tint) override;
         void SetSurface(int surface) { m_surface = surface; }
         std::int32_t Size() const override { return kSimSize; }  // modes draw in 1024 atlas pixels; the film scales them to its own resolution
 
         // ---- framework side
         void Reserve();  // allocates the maps (about 48 MB): done ahead of time by Prewarm so that the first start does not hitch
+        void Rebind(const std::uint8_t* keepMask) { m_keep = keepMask; m_dirty.fill(1); }  // the surface's field was rebuilt: the draw mask may live elsewhere now; everything is re-rendered
         void Allocate(const std::uint8_t* keepMask);  // keepMask: the surface's draw mask (Field::KeepMask), outlives the layer
         void BeginFrame();  // tiles that held moving things last frame are reset to the permanent film
         void EndFrame();
@@ -42,7 +45,14 @@ namespace DS::Film
         void ClearChanged() { m_changed.fill(0); }
         const std::uint32_t* Pixels() const { return m_pixels.data(); }
         bool WantsNormals() const;  // the look asks for a normal map and the framework's NormalMaps switch is on
-        const std::int16_t* Slopes() const { return m_slope.empty() ? nullptr : m_slope.data(); }  // 2 per pixel: thickness slope in x, y per atlas pixel, times 8192
+        const std::int16_t* Slopes() const { return m_slope.empty() ? nullptr : m_slope.data(); }
+        const std::uint8_t* Gloss() const { return m_gloss.data(); }
+        void SetGlossComp(bool on)
+        {
+            if (m_glossComp == on) return;
+            m_glossComp = on;
+            m_dirty.fill(1);
+        }  // per pixel 0..255: how wet the skin is here (the specular map)  // 2 per pixel: thickness slope in x, y per atlas pixel, times 8192
         float Alpha() const { return m_alpha; }
         const DripSim::Look& GetLook() const { return m_look; }
         bool AlphaChanged() const { return m_alphaChanged; }
@@ -55,7 +65,13 @@ namespace DS::Film
         const std::uint8_t* m_keep = nullptr;
         std::vector<float> m_perm;
         std::vector<float> m_view;
+        std::vector<float> m_flow;  // the mode's own simulated thickness (SetFlow), film resolution; empty = none. Drawn as a smooth sheen, not as drops
+        float m_flowAlpha = 1.0f;   // SetFlowLook (x the wet film's own opacity)
+        float m_flowBump = 1.0f;
+        float m_flowTint = 0.0f;
         std::vector<std::uint32_t> m_pixels;
+        std::vector<std::uint8_t> m_gloss;  // wetness per pixel (Gloss)
+        bool m_glossComp = false;
         std::vector<std::int16_t> m_slope;  // only for layers whose look asks for a normal map
         std::array<std::uint8_t, kTiles * kTiles> m_dirty{};
         std::array<std::uint8_t, kTiles * kTiles> m_changed{};  // re-rendered since the compositor last looked
@@ -73,6 +89,9 @@ namespace DS::Film
     // Each surface (body, hands, feet) has its own compositor: up to kMaxLayers layers, bottom to top in the order they were acquired, stacked
     // into that surface's final image.
     constexpr int kMaxLayers = 4;
+    void SetSpecMapsEnabled(bool on);
+    void SetPremultiplied(int surface, bool on);
+    void SetGlossCompensation(int surface, bool on);  // the surface's gloss map runs with the normal blend: the gloss is divided by the film's opacity, the material's specular scale raised to match  // the surface's overlay blends premultiplied: its final pixels are written as rgb x alpha (a change re-composites all)  // the framework's SpecMaps setting (with NormalMaps): the compositor also makes a gloss map
     void SetNormalMapsEnabled(bool on);  // the framework's NormalMaps setting: with it off no layer computes slopes or normals
     Layer* Acquire(int surface, const std::uint8_t* keepMask);  // nullptr when all are taken; the layer comes back cleared with the default look
     void Release(int surface, Layer* layer);
@@ -87,9 +106,15 @@ namespace DS::Film
     // The model-space normal map (RGBA8, the game's encoding: R = x, G = z, B = y of the skin-space normal) that goes with Pixels, or nullptr when no layer asks for one.
     // Changed tiles are the same as ChangedTiles.
     const std::uint32_t* NormalPixels(int surface);
+    // The gloss map for the overlay's specular slot (RGBA8 grey: 255 = wet, 0 = dry), or nullptr when it is off. Changed tiles are the same as ChangedTiles.
+    const std::uint32_t* SpecPixels(int surface);
+    void TakePartMs(double out[4]);
     // 1 for every 64 px tile (row-major, kTiles x kTiles) the last Render(surface) changed in the final image: only those need uploading.
     const std::uint8_t* ChangedTiles(int surface);
     // The specular settings the surface's overlay material should have: those of the top layer that asks for any (false = leave the material alone).
     bool MaterialSpec(int surface, float* power, float* scale);
     void Reset(int surface);                   // drops all layers (used when the surface is lost)
+    // The surface came back after it was lost (a rebuilt 3D, first person and back): its layers keep their film, get the new draw mask, and the whole image is composited and uploaded again.
+    void Rebind(int surface, const std::uint8_t* keepMask);
+    void Recomposite(int surface);  // the next Render composites and reports every tile again (the overlay textures take them anew)
 }

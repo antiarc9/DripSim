@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #include "Core.h"
+#include <ctime>
+#include <tlhelp32.h>
+#include <deque>
+#include "DripSimMode.h"
+#include "LogLimit.h"
 
 #include "Body.h"
 #include "Field.h"
@@ -26,6 +31,7 @@ namespace
         bool Busy(int s) { return DS::Spike::TextureBusy(s, DS::Spike::kOwnerCore); }
         void SetTiles(int s, const std::uint32_t* p, const std::uint8_t* t) { DS::Spike::TextureSetTiles(s, DS::Spike::kOwnerCore, p, t); }
         void SetNormalTiles(int s, const std::uint32_t* p, const std::uint8_t* t) { DS::Spike::TextureSetNormalTiles(s, DS::Spike::kOwnerCore, p, t); }
+        void SetSpecTiles(int s, const std::uint32_t* p, const std::uint8_t* t) { DS::Spike::TextureSetSpecTiles(s, DS::Spike::kOwnerCore, p, t); }
         void SetSpec(int s, bool has, float power, float scale) { DS::Spike::TextureSetSpec(s, DS::Spike::kOwnerCore, has, power, scale); }
     }
 
@@ -51,6 +57,7 @@ namespace
         float RestSteep(std::int32_t tri) const override { return F().RestSteep(tri); }
         float ZMin() const override { return F().ZMin(); }
         float ZMax() const override { return F().ZMax(); }
+        std::int32_t SeamTwin(std::int32_t x, std::int32_t y) const override { return F().SeamTwin(x, y); }
 
     private:
         const DS::Field::Instance& F() const { return DS::Field::Get(m_surface); }
@@ -60,7 +67,7 @@ namespace
 
     void Notify(const char* text)
     {
-        logger::info("Notify: {}", text ? text : "");
+        if (DS::LogAllow("notify")) logger::info("Notify: {}", text ? text : "");
         if (auto* console = RE::ConsoleLog::GetSingleton()) console->Print("%s", text ? text : "");
     }
 
@@ -160,11 +167,33 @@ namespace
     std::vector<Hotkey> g_hotkeys;
     std::mutex g_hotkeyMutex;
     std::array<SurfaceState, DS::Surface::Count> g_surf;
+
+    // An optional surface (face, hands, feet) that went away while a mode runs (first person and back, gloves, a rebuilt 3D) is prepared again: wait a moment for the new 3D,
+    // capture the mesh, rebuild the field (on the main thread: the modes read it, so it must not change under them), give it a texture, then the layers of the running modes
+    // (which kept their film) get the new draw mask and everything is uploaded again. After a few failed tries it stays off.
+    struct Reattach
+    {
+        bool active = false;
+        int step = 0;  // 0 waiting, 1 capturing, 2 texturing
+        int tries = 0;
+        std::chrono::steady_clock::time_point next;
+        std::chrono::steady_clock::time_point started;
+        std::shared_ptr<const DS::Body::Static> before;
+    };
+    std::array<Reattach, DS::Surface::Count> g_reattach;
     std::chrono::steady_clock::time_point g_prepStarted;
     std::chrono::steady_clock::time_point g_last;
     std::chrono::steady_clock::time_point g_lastField;
     std::chrono::steady_clock::time_point g_lastRender;
     float g_idleTimer = 0.0f;
+    // Back-off: when the body is lost again and again (another mod rebuilds the player's 3D every second or two, seen in a user's log 2026-11-08: 30 restarts in a minute,
+    // then a crash), automatic starts pause for a while, so DripSim does not work hardest while the game changes the most. A key press still starts a mode.
+    std::deque<std::chrono::steady_clock::time_point> g_lostTimes;
+    std::chrono::steady_clock::time_point g_holdOffUntil{};
+    // The body could not be prepared (no free overlay slot, most often): automatic starts wait, longer each time (30 s, 60 s, ... 10 min), and the notice shows
+    // at most every 5 minutes. A user without a free slot got the notice and ~10 log lines twice a second, because rain tried to start again at every Idle.
+    int g_bodyFailStreak = 0;
+    std::chrono::steady_clock::time_point g_lastSlotNotice{};
     double g_renderMs = 0;
     double g_updateMs = 0;
     double g_lastJobMs = 0;  // how long the last background render took
@@ -182,6 +211,22 @@ namespace
     };
     Perf g_perf;
     std::uint64_t g_renders = 0;
+
+    // One summary line for every effect run (from the first mode start to the last stop), written whatever PerfLog says: a player's log then always says
+    // what DripSim cost on that machine. Frames longer than 250 ms (menus, loading screens, the console) are left out of the averages.
+    struct Session
+    {
+        bool on = false;
+        std::chrono::steady_clock::time_point start{};
+        std::uint64_t frames = 0, skipped = 0, longFrames = 0, jobs = 0;
+        double frameSum = 0, frameMax = 0, ourMs = 0, jobSum = 0, jobMax = 0;
+        std::string modes;
+    };
+    Session g_session;
+    double g_baselineMs = 0;  // the game's frame time while no effect runs (a slow moving average)
+    std::string g_lastSummary = "(no effect has run yet)";
+    std::string g_systemInfo = "System: (not set)";
+    std::chrono::steady_clock::time_point g_lastAutoReport{};
 
     Entry* Find(std::string_view name)
     {
@@ -280,6 +325,7 @@ namespace
         if (Tex::Busy(surface)) Tex::Stop(surface);
         DS::Film::Reset(surface);
         g_surf[static_cast<std::size_t>(surface)] = SurfaceState{};
+        g_reattach[static_cast<std::size_t>(surface)] = Reattach{};
     }
 
     // Everything that needs the surfaces goes away when the last mode stops.
@@ -308,7 +354,7 @@ namespace
         e.surfaces.clear();
         e.active = false;
         e.finishing = false;
-        logger::info("Core: mode '{}' stopped", e.name);
+        if (DS::LogAllow("core-stopped")) logger::info("Core: mode '{}' stopped", e.name);
     }
 
     void ProcessStops()
@@ -453,7 +499,7 @@ namespace
     // ------------------------------------------------------------------ preparing the surfaces
     void FailSurface(int surface, const char* why)
     {
-        logger::warn("Core: surface '{}' is unavailable ({})", DS::Surface::Name(surface), why);
+        if (DS::LogAllow(std::format("surface-fail-{}-{}", surface, why), 2, 600)) logger::warn("Core: surface '{}' is unavailable ({})", DS::Surface::Name(surface), why);
         if (Tex::Busy(surface)) Tex::Stop(surface);
         g_surf[static_cast<std::size_t>(surface)].prep = Prep::Failed;
     }
@@ -509,12 +555,21 @@ namespace
             }
         }
         if (g_surf[DS::Surface::Body].prep == Prep::Failed) {
-            Notify("DripSim: no body overlay slot to draw on (needs a free 'Body [Ovl#]' slot; with no other overlay, the placeholder texture file is needed)");
+            ++g_bodyFailStreak;
+            const int waitSeconds = std::min(30 << std::min(g_bodyFailStreak - 1, 5), 600);
+            g_holdOffUntil = std::max(g_holdOffUntil, now + std::chrono::seconds(waitSeconds));
+            if (DS::LogAllow("body-fail-backoff", 3, 600)) logger::warn("Core: the body could not be prepared ({} time(s) in a row); automatic starts wait {} s (a key still starts at once)", g_bodyFailStreak, waitSeconds);
+            if (g_lastSlotNotice.time_since_epoch().count() == 0 || now - g_lastSlotNotice >= std::chrono::minutes(5)) {
+                g_lastSlotNotice = now;
+                Notify("DripSim: no body overlay slot to draw on (needs a free 'Body [Ovl#]' slot; with no other overlay, the placeholder texture file is needed)");
+            }
             g_pending.clear();
             for (int s = 0; s < DS::Surface::Count; ++s) ResetSurface(s);
             return false;
         }
-        return allDone && Ready(DS::Surface::Body);
+        const bool ready = allDone && Ready(DS::Surface::Body);
+        if (ready) g_bodyFailStreak = 0;
+        return ready;
     }
 
     // Starts the pending modes once their surfaces are ready.
@@ -563,7 +618,7 @@ namespace
             e->finishing = false;
             std::string names;
             for (const int s : e->surfaces) names += std::format("{}{}", names.empty() ? "" : "+", DS::Surface::Name(s));
-            logger::info("Core: mode '{}' started (variant {}, surfaces {})", e->name, request.variant, names);
+            if (DS::LogAllow("core-started")) logger::info("Core: mode '{}' started (variant {}, surfaces {})", e->name, request.variant, names);
         }
         g_pending.clear();
         g_last = g_lastField = g_lastRender = std::chrono::steady_clock::now();
@@ -595,29 +650,38 @@ namespace DS::Core
 
     bool WantsKey(std::uint32_t key)
     {
-        if (key == kKeyG || key == kKeyH || key == kKeyF10) return true;
+        if (key == kKeyF10) return true;  // F10 (re-read the settings) is always on
+        if (!DS::Params::Get().hotkeys) return false;  // Hotkeys=0 (the default): no other key
+        if ((key == kKeyG || key == kKeyH) && DS::Params::Get().debugKeys) return true;
         std::scoped_lock lock(g_hotkeyMutex);
         return std::ranges::any_of(g_hotkeys, [key](const Hotkey& h) { return h.key == key; });
+    }
+
+    // F10 and the tuner (DripSimReloadSettings): every INI is read again; the modes apply their values at once.
+    void ReloadAll(bool notify)
+    {
+        const auto summary = DS::Params::Load();
+        for (auto& e : g_modes) {
+            try {
+                e->mode->Reload();
+            } catch (...) {
+                logger::error("Core: mode '{}' threw in Reload", e->name);
+            }
+        }
+        if (notify) Notify(std::format("DripSim: settings reloaded ({}, {} modes)", summary, g_modes.size()).c_str());
     }
 
     void OnKey(std::uint32_t key, bool shift, bool ctrl)
     {
         if (!CanUseHotkeys()) return;
-        if (key == kKeyH && ctrl && shift) return DS::Spike::RequestBodyDump();
-        if (key == kKeyH && ctrl) return DS::Spike::DumpPlayerShapes();
-        if (key == kKeyG && ctrl && shift) return DS::Spike::ToggleGravityView();
-        if (key == kKeyF10) {
-            const auto summary = DS::Params::Load();
-            for (auto& e : g_modes) {
-                try {
-                    e->mode->Reload();
-                } catch (...) {
-                    logger::error("Core: mode '{}' threw in Reload", e->name);
-                }
-            }
-            Notify(std::format("DripSim: settings reloaded ({}, {} modes)", summary, g_modes.size()).c_str());
-            return;
+        if (key == kKeyF10) return ReloadAll(true);  // always on
+        if (!DS::Params::Get().hotkeys) return;
+        if (DS::Params::Get().debugKeys) {  // the author's debug keys (DebugKeys=1 in DripSim.ini; off for players: Ctrl is the crouch key)
+            if (key == kKeyH && ctrl && shift) return DS::Spike::RequestBodyDump();
+            if (key == kKeyH && ctrl) return DS::Spike::DumpPlayerShapes();
+            if (key == kKeyG && ctrl && shift) return DS::Spike::ToggleGravityView();
         }
+        if (key == kKeyF10) return ReloadAll(true);
         std::vector<Hotkey> matches;
         {
             std::scoped_lock lock(g_hotkeyMutex);
@@ -650,10 +714,16 @@ namespace DS::Core
             if (!Ready(s)) continue;
             Tex::SetTiles(s, DS::Film::Pixels(s), DS::Film::ChangedTiles(s));
             if (const auto* normals = DS::Film::NormalPixels(s)) Tex::SetNormalTiles(s, normals, DS::Film::ChangedTiles(s));
+            if (const auto* gloss = DS::Film::SpecPixels(s)) Tex::SetSpecTiles(s, gloss, DS::Film::ChangedTiles(s));
             ++g_renders;
         }
         g_renderMs += g_async->ms;
         if (g_async->ms > 0.0) g_lastJobMs = g_async->ms;
+        if (g_session.on && g_async->ms > 0.0) {
+            ++g_session.jobs;
+            g_session.jobSum += g_async->ms;
+            g_session.jobMax = std::max(g_session.jobMax, g_async->ms);
+        }
         g_async->ms = 0;
         return true;
     }
@@ -663,6 +733,54 @@ namespace DS::Core
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
     }
 
+    void EndSession(std::chrono::steady_clock::time_point now)
+    {
+        auto& s = g_session;
+        s.on = false;
+        const double seconds = std::chrono::duration<double>(now - s.start).count();
+        if (seconds < 2.0 || s.frames == 0) return;
+        const double n = static_cast<double>(s.frames);
+        const double avg = s.frameSum / n;
+        const std::string base = g_baselineMs > 0.0 ? std::format("{:.1f} ms ({:.0f} fps)", g_baselineMs, 1000.0 / g_baselineMs) : "not measured";
+        g_lastSummary = std::format("Summary: {} ran {:.0f} s: game frame {:.1f} ms avg ({:.0f} fps), worst {:.0f} ms; without an effect {} | DripSim main thread {:.2f} ms a frame | "
+                                    "film job {:.0f} ms avg, worst {:.0f} ms ({} jobs); {:.0f} % of the frames waited for the film",
+            s.modes.empty() ? "an effect" : s.modes, seconds, avg, 1000.0 / std::max(avg, 0.001), s.frameMax, base, s.ourMs / std::max<double>(static_cast<double>(s.frames + s.skipped + s.longFrames), 1.0),
+            s.jobs ? s.jobSum / static_cast<double>(s.jobs) : 0.0, s.jobMax, s.jobs, 100.0 * static_cast<double>(s.skipped) / std::max<double>(n, 1.0));
+        logger::info("{}", g_lastSummary);
+        if (DS::Params::Get().autoReport && (g_lastAutoReport.time_since_epoch().count() == 0 || now - g_lastAutoReport >= std::chrono::minutes(5))) {
+            g_lastAutoReport = now;
+            WriteReport(false);
+        }
+    }
+
+    // Every frame: the frame interval goes into the running effect's summary, or into the baseline while no effect runs.
+    void UpdateSession(std::chrono::steady_clock::time_point now, double interval)
+    {
+        const bool active = AnyEntryActive();
+        auto& s = g_session;
+        if (active && !s.on) {
+            s = Session{};
+            s.on = true;
+            s.start = now;
+        } else if (!active && s.on) {
+            EndSession(now);
+        }
+        if (!active) {
+            if (interval < 250.0) g_baselineMs = g_baselineMs <= 0.0 ? interval : g_baselineMs * 0.99 + interval * 0.01;
+            return;
+        }
+        if (interval >= 250.0) {
+            ++s.longFrames;
+            return;
+        }
+        ++s.frames;
+        s.frameSum += interval;
+        s.frameMax = std::max(s.frameMax, interval);
+        for (const auto& e : g_modes) {  // (at most a few modes)
+            if (e->active && s.modes.find(e->name) == std::string::npos) s.modes += (s.modes.empty() ? "" : "+") + e->name;
+        }
+    }
+
     // Accumulates the whole OnFrame cost and writes the PERF line.
     struct FrameTimer
     {
@@ -670,6 +788,7 @@ namespace DS::Core
         ~FrameTimer()
         {
             g_perf.total += MsSince(start);
+            if (g_session.on) g_session.ourMs += MsSince(start);
             if (!DS::Params::Get().perfLog || g_perf.frames < 30 || MsSince(g_perf.logged) < 5000.0) return;
             const double n = static_cast<double>(g_perf.frames);
             if (!AnyEntryActive()) {  // no effect: only the game's own frame time, the baseline to compare the effect against (a menu or a loading screen makes it large: compare in the same place)
@@ -690,6 +809,73 @@ namespace DS::Core
         }
     };
 
+    // One step per frame for every surface that is being prepared again (see Reattach).
+    void ReattachStep(std::chrono::steady_clock::time_point now)
+    {
+        for (int id = 1; id < DS::Surface::Count; ++id) {
+            auto& r = g_reattach[static_cast<std::size_t>(id)];
+            if (!r.active) continue;
+            const auto name = DS::Surface::Name(id);
+            const auto retry = [&](const char* why) {
+                if (Tex::Busy(id)) Tex::Stop(id);
+                ++r.tries;
+                if (r.tries >= 5) {
+                    logger::warn("Core: surface '{}' could not be attached again ({}); it stays off", name, why);
+                    r = Reattach{};
+                    return;
+                }
+                logger::info("Core: surface '{}' not back yet ({}); trying again", name, why);
+                r.step = 0;
+                r.next = now + std::chrono::milliseconds(2000);
+            };
+            if (r.step == 0) {
+                if (now < r.next) continue;
+                r.before = DS::Body::Get(id);
+                DS::Body::Request(id, false);
+                r.started = now;
+                r.step = 1;
+            } else if (r.step == 1) {
+                const auto data = DS::Body::Get(id);
+                if (data && data != r.before) {
+                    WaitRender();  // the film worker reads the field
+                    if (!DS::Field::Get(id).Build(data)) {
+                        retry("the field could not be built");
+                        continue;
+                    }
+                    const int state = Tex::Start(id);
+                    if (state == 1) {
+                        r.step = 3;
+                    } else if (state == 2) {
+                        r.step = 2;
+                        r.started = now;
+                    } else {
+                        retry("no texture could be started");
+                        continue;
+                    }
+                } else if (now - r.started > std::chrono::seconds(3)) {
+                    retry("no capture arrived");
+                    continue;
+                }
+            } else if (r.step == 2) {
+                const int state = Tex::Poll(id);
+                if (state == 1) r.step = 3;
+                else if (state == 0) retry("the placeholder texture could not be set up");
+                else if (now - r.started > std::chrono::seconds(4)) retry("the placeholder texture did not load");
+            }
+            if (r.step == 3) {
+                WaitRender();
+                DS::Film::Rebind(id, DS::Field::Get(id).KeepMask().data());
+                g_surf[static_cast<std::size_t>(id)].prep = Prep::Ready;
+                logger::info("Core: surface '{}' is back (attached again after {} {})", name, r.tries + 1, r.tries == 0 ? "try" : "tries");
+                r.step = 4;  // the normal map texture comes a moment after the colour texture: send every tile once more then
+                r.next = now + std::chrono::milliseconds(1500);
+            } else if (r.step == 4 && now >= r.next) {
+                DS::Film::Recomposite(id);
+                r = Reattach{};
+            }
+        }
+    }
+
     void OnFrame()
     {
         const auto now = std::chrono::steady_clock::now();
@@ -699,6 +885,7 @@ namespace DS::Core
             g_perf.frameSum += interval;
             g_perf.frameMax = std::max(g_perf.frameMax, interval);
             ++g_perf.frames;
+            UpdateSession(now, interval);
         }
         g_perf.lastFrame = now;
         if (g_last.time_since_epoch().count() == 0) g_last = g_lastField = g_lastRender = now;
@@ -707,7 +894,9 @@ namespace DS::Core
         g_perf.collect += MsSince(collectStart);
         if (!collected) {
             ++g_perf.skipped;
-            g_last = now;  // skipped: the game goes on, the film catches up
+            if (g_session.on) ++g_session.skipped;
+            // skipped: the game goes on, the film catches up. The time is kept (g_last stays): the next update moves the drops by all of it (up to 0.1 s), so they move
+            // at their real speed in even steps; before, the skipped time was dropped and the drops slowed down and moved unevenly while the film was slow
             return;
         }
         ProcessStops();
@@ -728,8 +917,9 @@ namespace DS::Core
                     }).detach();
                 }
                 DS::World::Tick(dt);
+                const bool holdOff = now < g_holdOffUntil;
                 for (auto& e : g_modes) {
-                    if (e->active) continue;
+                    if (e->active || holdOff) continue;
                     try {
                         e->mode->Idle(&g_api, dt);
                     } catch (...) {
@@ -756,18 +946,33 @@ namespace DS::Core
         }
 
         if (!DS::Field::Get(DS::Surface::Body).Alive() || !Tex::Running(DS::Surface::Body)) {
-            logger::info("Core: the body or its overlay is gone; stopping all modes");
+            if (DS::LogAllow("core-gone")) logger::info("Core: the body or its overlay is gone; stopping all modes");
             StopAll(StopReason::BodyLost);
+            g_lostTimes.push_back(now);
+            while (!g_lostTimes.empty() && now - g_lostTimes.front() > std::chrono::seconds(20)) g_lostTimes.pop_front();
+            if (g_lostTimes.size() >= 3) {
+                g_holdOffUntil = now + std::chrono::seconds(30);
+                g_lostTimes.clear();
+                logger::warn("Core: the body was lost 3 times in 20 s (something rebuilds the player's 3D again and again): no automatic start for 30 s");
+            }
             g_last = now;
             return;
         }
         for (int s = 1; s < DS::Surface::Count; ++s) {  // an optional surface that went away (gloves, boots, a rebuilt 3D) just stops being drawn
             if (Ready(s) && (!DS::Field::Get(s).Alive() || !Tex::Running(s))) {
-                logger::info("Core: surface '{}' is gone", DS::Surface::Name(s));
+                if (DS::LogAllow("core-surface-gone")) logger::info("Core: surface '{}' is gone", DS::Surface::Name(s));
                 if (Tex::Busy(s)) Tex::Stop(s);
                 g_surf[static_cast<std::size_t>(s)].prep = Prep::Failed;
+                const bool wanted = std::ranges::any_of(g_modes, [s](const std::unique_ptr<Entry>& e) { return e->active && e->layers[static_cast<std::size_t>(s)]; });
+                if (wanted) {  // a running mode draws on it: try to get it back
+                    auto& r = g_reattach[static_cast<std::size_t>(s)];
+                    r = Reattach{};
+                    r.active = true;
+                    r.next = now + std::chrono::milliseconds(1000);
+                }
             }
         }
+        ReattachStep(now);
         const float dt = static_cast<float>(std::clamp(std::chrono::duration<double>(now - g_last).count(), 0.0, 0.1));
         g_last = now;
         if (now - g_lastField >= std::chrono::milliseconds(33)) {
@@ -805,8 +1010,14 @@ namespace DS::Core
         ++g_frames;
 
         DS::Spike::TextureSetNormalMaps(DS::Params::Get().normalMaps);
+        DS::Spike::TextureSetSpecMaps(DS::Params::Get().normalMaps && DS::Params::Get().specMaps);
+        DS::Spike::TextureSetPremultiplied(DS::Params::Get().premultiplied);
+        for (int s = 0; s < DS::Surface::Count; ++s) DS::Film::SetPremultiplied(s, DS::Spike::TexturePremultiplied(s));
+        for (int s = 0; s < DS::Surface::Count; ++s) DS::Film::SetGlossCompensation(s, DS::Spike::TextureSpecRunning(s) && !DS::Spike::TexturePremultiplied(s));
         DS::Spike::TextureSetRefraction(DS::Params::Get().refraction);
+        DS::Spike::TextureSetDecal(DS::Params::Get().overlayDecal);
         DS::Film::SetNormalMapsEnabled(DS::Params::Get().normalMaps);
+        DS::Film::SetSpecMapsEnabled(DS::Params::Get().normalMaps && DS::Params::Get().specMaps);
         for (int s = 0; s < DS::Surface::Count; ++s) {
             if (!Ready(s)) continue;
             float power = 0.0f;
@@ -840,10 +1051,148 @@ namespace DS::Core
             g_renders = 0;
         }
     }
+
+    // ------------------------------------------------------------------ the bug report (KeyReport, default Shift+F6)
+    std::string g_gameInfo = "(not set)";
+
+    void SetGameInfo(const std::string& text) { g_gameInfo = text; }
+    void SetSystemInfo(const std::string& text) { g_systemInfo = text; }
+
+    // The last `count` lines of a text file (empty when it cannot be read).
+    std::vector<std::string> TailOf(const std::filesystem::path& path, std::size_t count)
+    {
+        std::deque<std::string> lines;
+        std::ifstream in(path);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+            if (lines.size() > count) lines.pop_front();
+        }
+        return { lines.begin(), lines.end() };
+    }
+
+    const char* PrepName(Prep p)
+    {
+        switch (p) {
+        case Prep::None: return "not started";
+        case Prep::Capturing: return "capturing the mesh";
+        case Prep::Building: return "building the field";
+        case Prep::Texturing: return "setting up the texture";
+        case Prep::Ready: return "ready";
+        case Prep::Failed: return "unavailable";
+        }
+        return "?";
+    }
+
+    // One file with everything a bug report needs: the versions, what is loaded, the state of the surfaces and the tail of every DripSim log. The player attaches this one file.
+    void WriteReport(bool notify)
+    {
+        const auto directory = SKSE::log::log_directory();
+        if (!directory) return;
+        std::ofstream out(*directory / "DripSim_report.txt", std::ios::trunc);
+        if (!out) return;
+        const std::time_t now = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now);
+        char stamp[40] = {};
+        std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &local);
+        out << "DripSim report, " << stamp << "\n";
+        out << "framework " << DS_VERSION << ", API " << DripSim::kApiVersion << " (serves " << DripSim::kApiVersionMin << ".." << DripSim::kApiVersion << ")\n";
+        out << g_gameInfo << "\n";
+        out << g_systemInfo << "\n";
+        out << (g_session.on ? "(an effect is running now) " : "") << "last effect run: " << g_lastSummary << "\n";
+
+        out << "\n== Address Library files in Data\\\\SKSE\\\\Plugins\n";
+        std::error_code ec;
+        bool anyAddress = false;
+        for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path("Data") / "SKSE" / "Plugins", ec)) {
+            auto name = entry.path().filename().string();
+            std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (name.starts_with("version-") || name.starts_with("versionlib-")) {
+                out << "  " << entry.path().filename().string() << "\n";
+                anyAddress = true;
+            }
+        }
+        if (!anyAddress) out << "  none found\n";
+
+        out << "\n== DripSim files loaded in the game\n";
+        if (const HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, ::GetCurrentProcessId()); snap != INVALID_HANDLE_VALUE) {
+            MODULEENTRY32W module{};
+            module.dwSize = sizeof(module);
+            for (BOOL ok = ::Module32FirstW(snap, &module); ok; ok = ::Module32NextW(snap, &module)) {
+                const std::wstring name = module.szModule;
+                if (name.starts_with(L"DripSim")) out << "  " << std::filesystem::path(name).string() << "\n";
+            }
+            ::CloseHandle(snap);
+        }
+
+        const auto& params = DS::Params::Get();
+        out << "\n== Framework settings (DripSim.ini, as read)\n";
+        out << "  Enabled " << params.enabled << ", Hotkeys " << params.hotkeys << ", AutoReport " << params.autoReport << ", NormalMaps " << params.normalMaps << ", SpecMaps " << params.specMaps << ", PremultipliedAlpha " << params.premultiplied << ", OverlayDecal " << params.overlayDecal << ", PerfLog " << params.perfLog << ", DonorTextures "
+            << params.donor << ", Refraction " << params.refraction << ", RainDensityRef " << params.rainDensityRef << "\n";
+
+        out << "\n== Modes\n";
+        for (const auto& e : g_modes) {
+            out << "  " << e->name << ": " << (e->active ? "running" : "idle");
+            if (e->active) {
+                out << ", surfaces";
+                for (const int s : e->surfaces) out << " " << DS::Surface::Name(s);
+            }
+            out << "\n";
+        }
+        out << "\n== Surfaces\n";
+        for (int s = 0; s < DS::Surface::Count; ++s) {
+            out << "  " << DS::Surface::Name(s) << ": " << PrepName(g_surf[static_cast<std::size_t>(s)].prep) << ", texture " << (Tex::Running(s) ? "running" : "off") << ", field "
+                << (DS::Field::Get(s).Alive() ? "alive" : "gone") << "\n";
+        }
+        out << "  overlay textures use " << DS::Atlas::kFilm << " x " << DS::Atlas::kFilm << " pixels each (4 bytes a pixel, plus the same again for the normal map)\n";
+
+        for (const auto& entry : std::filesystem::directory_iterator(*directory, ec)) {
+            const auto name = entry.path().filename().string();
+            if (!entry.is_regular_file() || !name.starts_with("DripSim") || entry.path().extension() != ".log") continue;
+            const bool main = name == "DripSim.log";
+            out << "\n== " << name << " (last " << (main ? 250 : 80) << " lines)\n";
+            for (const auto& line : TailOf(entry.path(), main ? 250 : 80)) out << line << "\n";
+        }
+        out << "\n== end of report\n";
+        if (notify) Notify("DripSim: report written (DripSim_report.txt in the SKSE log folder). Attach it to a bug report.");
+    }
+
+    void RegisterReportKey()
+    {
+        const DripSim::Ini ini("DripSim");
+        std::uint32_t code = 0;
+        bool shift = false;
+        bool ctrl = false;
+        const auto text = ini.Text("KeyReport", "Shift+F6");
+        if (g_api.ParseKey(text.c_str(), &code, &shift, &ctrl) && code && g_api.RegisterHotkey(code, shift, ctrl, [](void*) { WriteReport(true); }, nullptr)) {
+            logger::info("Hotkey KeyReport = {} (writes DripSim_report.txt)", text);
+        } else {
+            logger::info("KeyReport={} is not a usable key (or NONE): no report key", text);
+        }
+    }
+
 }
 
 // The framework's entry point for mode plugins (see api/DripSimMode.h: DripSim::RequestAPI).
 extern "C" __declspec(dllexport) void* DripSimRequestAPI(std::uint32_t version)
 {
     return version >= DripSim::kApiVersionMin && version <= DripSim::kApiVersion ? static_cast<void*>(DS::Core::Api()) : nullptr;
+}
+
+// For the author's tuner plugin (a separate, private DLL): read every INI again, and save the pixels of the film. Any thread; the work runs on the game's main thread.
+extern "C" __declspec(dllexport) void DripSimReloadSettings()
+{
+    if (auto* tasks = SKSE::GetTaskInterface()) tasks->AddTask([] { DS::Core::ReloadAll(false); });
+}
+
+extern "C" __declspec(dllexport) void DripSimDumpFilm()
+{
+    if (auto* tasks = SKSE::GetTaskInterface()) {
+        tasks->AddTask([] {
+            DS::Spike::TextureDumpFilm();
+            RE::SendHUDMessage::ShowHUDMessage("DripSim: film dump written");
+        });
+    }
 }

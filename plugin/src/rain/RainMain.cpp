@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #include "RainMode.h"
+#include "RotateLog.h"
 
 // Plugin entry of DripSimRain.dll: registers the "rain" mode with the DripSim framework and binds its keys and the mod event.
 namespace
@@ -79,6 +80,7 @@ namespace
 
 SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
+    DS::RotateLog("DripSimRain");
     SKSE::Init(skse);
     logger::info("DripSimRain {} loading", DSR_VERSION);
     if (!SKSE::GetMessagingInterface()->RegisterListener(OnMessage)) {

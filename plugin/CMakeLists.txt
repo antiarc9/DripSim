@@ -28,6 +28,7 @@ add_commonlibsse_plugin(DripSim
         src/core/Film.cpp
         src/core/Gravity.cpp
         src/core/Params.cpp
+        src/core/SystemInfo.cpp
 )
 add_commonlibsse_plugin(DripSimRain
     NAME DripSimRain
@@ -39,6 +40,7 @@ add_commonlibsse_plugin(DripSimRain
 )
 
 
+
 set(DRIPSIM_TARGETS DripSim DripSimRain)
 foreach(target ${DRIPSIM_TARGETS})
     target_compile_features(${target} PRIVATE cxx_std_23)
@@ -46,6 +48,8 @@ foreach(target ${DRIPSIM_TARGETS})
     target_precompile_headers(${target} PRIVATE src/core/PCH.h)
 endforeach()
 target_compile_definitions(DripSim PRIVATE DS_VERSION="${PROJECT_VERSION}")
+# SystemInfo.cpp uses the real DXGI headers: without the precompiled header (CommonLib has its own D3D types)
+set_source_files_properties(src/core/SystemInfo.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 target_compile_definitions(DripSimRain PRIVATE DSR_VERSION="${PROJECT_VERSION}")
 
 # DripSimPreview: runs a mode without the game and writes pictures (see tools/preview/Preview.cpp). Same film, field and mode sources as the plugins.

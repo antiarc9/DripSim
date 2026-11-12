@@ -31,8 +31,20 @@ namespace DS::Spike
     void TextureSetTiles(int surface, int owner, const std::uint32_t* pixels, const std::uint8_t* tiles);
     // The optional normal map (model-space, same size): switched on by the framework's NormalMaps setting; the tiles are those of TextureSetTiles.
     void TextureSetNormalMaps(bool on);
+    // Spike S7 (OverlayDecal=1 in DripSim.ini): the overlay shapes get the decal flags (depth bias), against z-fighting with the skin. Logs the overlay's flags once.
+    void TextureSetDecal(bool on);
+    // Debug (KeyFilmDump): the pixels of every running surface as DripSim_film_<surface>.tga in the SKSE log folder.
+    void TextureDumpFilm();
     void TextureSetRefraction(float power);  // spike S5: screen-space refraction of the overlay (0 = off); needs the normal map running
     void TextureSetNormalTiles(int surface, int owner, const std::uint32_t* pixels, const std::uint8_t* tiles);
+    // The optional specular map in the overlay's slot 7 (SpecMaps=1; it needs NormalMaps=1: it is loaded with the normal map): the gloss of each pixel, RGBA8 grey.
+    void TextureSetSpecMaps(bool on);
+    // PremultipliedAlpha=1: the overlays blend as colour + skin x (1 - alpha), so the engine's shine on the film is not scaled down by its opacity. The film's pixels must
+    // then be premultiplied (TexturePremultiplied says whether a surface's overlay is in that mode now).
+    void TextureSetPremultiplied(bool on);
+    bool TexturePremultiplied(int surface);
+    bool TextureSpecRunning(int surface);  // the surface's own gloss map is in its overlay's specular slot now
+    void TextureSetSpecTiles(int surface, int owner, const std::uint32_t* pixels, const std::uint8_t* tiles);
     // What the end-of-frame uploads cost on the render thread (for the PERF log line); taking it resets the counters.
     struct TextureUploadStats
     {

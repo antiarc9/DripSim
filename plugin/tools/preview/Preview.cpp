@@ -74,6 +74,7 @@ namespace
         float RestSteep(std::int32_t tri) const override { return m_field.RestSteep(tri); }
         float ZMin() const override { return m_field.ZMin(); }
         float ZMax() const override { return m_field.ZMax(); }
+        std::int32_t SeamTwin(std::int32_t x, std::int32_t y) const override { return m_field.SeamTwin(x, y); }
 
     private:
         const DS::Field::Instance& m_field;
@@ -352,7 +353,7 @@ namespace
         return name == "rain" ? RainModeInstance() : nullptr;
     }
 
-    std::string IniName(const std::string& mode)
+    std::string IniName([[maybe_unused]] const std::string& mode)
     {
         return "DripSimRain";
     }
@@ -489,6 +490,7 @@ int main(int argc, char** argv)
     PreviewWorld world;
     world.rain = args.rain;
     DS::Film::SetNormalMapsEnabled(true);
+    DS::Film::SetSpecMapsEnabled(args.atlas);  // (the gloss map is only written out with --atlas)
     auto* layer = DS::Film::Acquire(DS::Surface::Body, field.KeepMask().data());
     Host host(layer, &fieldView, &world);
     DripSim::IMode* mode = ModeByName(args.mode);
@@ -543,6 +545,15 @@ int main(int argc, char** argv)
                     atlas[i * 3 + 2] = static_cast<std::uint8_t>(20.0f * (1 - a) + static_cast<float>((film[i] >> 16) & 0xFF) * a);
                 }
                 WritePng(std::format("{}_atlas_t{:04.1f}.png", args.mode, args.at[nextShot]), atlas, kAtlas, kAtlas);
+                if (const auto* gloss = DS::Film::SpecPixels(DS::Surface::Body)) {  // the specular map the game would get
+                    for (std::size_t i = 0; i < static_cast<std::size_t>(kAtlas) * kAtlas; ++i) {
+                        const auto v = static_cast<std::uint8_t>(gloss[i] & 0xFF);
+                        atlas[i * 3] = v;
+                        atlas[i * 3 + 1] = v;
+                        atlas[i * 3 + 2] = v;
+                    }
+                    WritePng(std::format("{}_gloss_t{:04.1f}.png", args.mode, args.at[nextShot]), atlas, kAtlas, kAtlas);
+                }
             }
             std::printf("t=%.1fs -> %s\n", args.at[nextShot], name.c_str());
             ++nextShot;
@@ -552,6 +563,12 @@ int main(int argc, char** argv)
     const double total = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
     std::printf("simulated %d frames (%.1f s) in %.1f s; mode %.2f ms/frame, film render %.2f ms/frame (on this machine)\n", frames, static_cast<double>(frames) * dt, total,
         modeMs / std::max(frames, 1), renderMs / std::max(frames, 1));
+    {
+        double part[4];
+        DS::Film::TakePartMs(part);
+        const double n = std::max(frames, 1);
+        std::printf("film parts per frame: layer tiles %.2f ms, composite %.2f ms, normal map %.2f ms, gloss map %.2f ms\n", part[0] / n, part[1] / n, part[2] / n, part[3] / n);
+    }
     std::printf("layer tiles rendered per frame: %.1f (of %d)\n", static_cast<double>(DS::Film::TilesRendered()) / std::max(frames, 1), DS::Film::kTiles * DS::Film::kTiles);
     if (mode2) mode2->Stop(&host2, DripSim::StopReason::Requested);
     mode->Stop(&host, DripSim::StopReason::Requested);

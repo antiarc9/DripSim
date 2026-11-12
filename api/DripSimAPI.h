@@ -2,7 +2,7 @@
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #pragma once
 
-// DripSim framework API (version 4: IWorld::Exertion; version 3: ILayer::SetWetFilm; version 2: IWorld::WaterDepth / IsSwimming). A "mode" is a separate SKSE plugin that simulates one kind of fluid on the player's skin
+// DripSim framework API (version 5: ILayer::SetFlow; version 4: IWorld::Exertion; version 3: ILayer::SetWetFilm; version 2: IWorld::WaterDepth / IsSwimming). A "mode" is a separate SKSE plugin that simulates one kind of fluid on the player's skin
 // (rain water, ...) and draws it into a film layer that the framework composites onto one overlay texture.
 //
 // How a mode plugin connects (see DripSimMode.h): at kPostLoad it calls DripSim::RequestAPI(), gets an IDripSim*, and registers
@@ -16,7 +16,7 @@
 
 namespace DripSim
 {
-    constexpr std::uint32_t kApiVersion = 4;
+    constexpr std::uint32_t kApiVersion = 5;
     constexpr std::uint32_t kApiVersionMin = 3;  // the framework also serves modes built against these older versions (new functions are only ever added at the end)
     constexpr const char* kFrameworkModule = "DripSim.dll";
 
@@ -77,6 +77,15 @@ namespace DripSim
         // API 3: a thin clear film of water over all the skin below a height (in the skin's own space, the same units as IField::CenterZ), a uniform wet sheen without drawing it:
         // amount 0..1 (0 = none, scales the film), soft waterline. Changes are applied in steps (the film is re-rendered), so call it every frame with a slowly changing amount.
         virtual void SetWetFilm(float belowZ, float amount) = 0;
+        // API 5: a thickness map the mode simulates itself (water that flows as a sheet), `size` x `size` cells over the whole atlas (size must divide the film, e.g. 512),
+        // same height units as Stamp. It is max-blended with what Stamp drew. changed: tilesPerSide x tilesPerSide bytes (row-major), 1 = that block of the map is new
+        // (nullptr = all). heights nullptr = remove the map. The map is read during the call (the mode may change its copy afterwards).
+        virtual void SetFlow(const float* heights, std::int32_t size, const std::uint8_t* changed, std::int32_t tilesPerSide) = 0;
+        // API 5: how the SetFlow map is drawn. It is NOT drawn like Stamp's drops (no body colour, rim, halo or glints: on a sheet of water that read as wax);
+        // it is a smooth wet sheen: alpha = its opacity as a multiple of the look's wet film (filmAlpha plus its halo, the wet skin the other surfaces show; 1 = the same),
+        // bump = how strongly its thickness bends the normal map (the engine's lights then shine on streams), tint 0..1 = the sheen's colour from the look's haloColor
+        // (wet skin) to its rimColor (bright). Defaults 1, 1, 0.
+        virtual void SetFlowLook(float alpha, float bump, float tint) = 0;
     };
 
     // One skin surface (the body, the hands, the feet) as a UV atlas. Positions are atlas pixels. tri ids are -1 outside the atlas islands.
@@ -93,6 +102,9 @@ namespace DripSim
         virtual float RestSteep(std::int32_t tri) const = 0;
         virtual float ZMin() const = 0;
         virtual float ZMax() const = 0;
+        // API 5: across a UV seam. For a skin pixel near the edge of a UV island: the pixel on the other side of the seam (another island, or another part of the same
+        // island) at the same place on the body, as y * Size() + x; -1 when the pixel is not near a seam or the edge is open (the neck hole, a cut). Lets water cross seams.
+        virtual std::int32_t SeamTwin(std::int32_t x, std::int32_t y) const = 0;
     };
 
     // The world around the player.

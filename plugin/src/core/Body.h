@@ -16,6 +16,10 @@ namespace DS::Body
         int shape = 0;  // preview build (no engine): nothing to hold
 #else
         RE::NiPointer<RE::BSGeometry> shape;  // the overlay shape it was read from (its skin instance holds the live bones)
+        // The bones of the skin instance, with a reference each. skinInstance->bones holds plain pointers: when the game rebuilds the player's 3D (clothes change,
+        // a scene, a re-equip) it frees the old bones, and reading them crashed (crash log 2026-11-08). With our own reference a bone stays valid memory; its
+        // transform is then just stale until Field::Alive() sees that the shape was replaced.
+        std::vector<RE::NiPointer<RE::NiAVObject>> boneRefs;
 #endif
         std::uint32_t vertexCount = 0;
         std::uint32_t triangleCount = 0;

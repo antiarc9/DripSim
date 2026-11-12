@@ -51,7 +51,10 @@ namespace
     }
 
     bool g_normalsOn = false;
+    bool g_specOn = false;
+    constexpr float kGlossRef = 0.15f;  // the opacity at which the gloss is not raised (gloss compensation)
     std::atomic<std::uint64_t> g_tilesRendered{ 0 };
+    double g_partMs[4] = {};  // layers, composite, normals, gloss (main or job thread, one at a time: a statistic)
 
     struct Canvas
     {
@@ -60,6 +63,9 @@ namespace
         std::vector<DS::Film::Layer*> order;  // acquired layers, bottom to top
         std::vector<std::uint32_t> final;
         std::vector<std::uint32_t> normal;  // the model-space normal map, when some layer wants one
+        std::vector<std::uint32_t> spec;    // the gloss map (SpecMaps), grey
+        bool premul = false;              // `final` is premultiplied (the overlay blends that way)
+        bool glossComp = false;           // the gloss map makes up for the film's opacity (its spec map runs, normal blend)
         std::array<std::uint8_t, DS::Film::kTiles * DS::Film::kTiles> changed{};  // tiles of `final` changed by the last Render
         bool recomposite = true;
     };
@@ -143,6 +149,7 @@ namespace DS::Film
             m_perm.assign(static_cast<std::size_t>(kN) * kN, 0.0f);
             m_view.assign(m_perm.size(), 0.0f);
             m_pixels.assign(m_perm.size(), 0u);
+            m_gloss.assign(m_perm.size(), 0);
             m_pristine = true;
         }
     }
@@ -165,9 +172,11 @@ namespace DS::Film
             std::ranges::fill(m_perm, 0.0f);
             std::ranges::fill(m_view, 0.0f);
             std::ranges::fill(m_pixels, 0u);
+            std::ranges::fill(m_gloss, std::uint8_t{ 0 });
             std::ranges::fill(m_slope, std::int16_t{ 0 });
             m_pristine = true;
         }
+        m_flow.clear();
         m_dirty.fill(1);
         m_dynLast.fill(0);
         m_dynNow.fill(0);
@@ -191,6 +200,63 @@ namespace DS::Film
         m_wetZ = belowZ;
         m_pristine = false;
         m_dirty.fill(1);
+    }
+
+    void Layer::SetFlow(const float* heights, std::int32_t size, const std::uint8_t* changed, std::int32_t tilesPerSide)
+    {
+        if (m_perm.empty()) return;
+        if (!heights) {
+            if (!m_flow.empty()) {
+                m_flow.clear();
+                m_dirty.fill(1);
+            }
+            return;
+        }
+        if (size <= 0 || kN % size != 0 || tilesPerSide <= 0 || size % tilesPerSide != 0) return;
+        if (m_flow.empty()) m_flow.assign(m_perm.size(), 0.0f);
+        m_pristine = false;
+        const int f = kN / size;                // film pixels a cell
+        const int cells = size / tilesPerSide;  // cells a tile side
+        const float inv = 1.0f / static_cast<float>(f);
+        for (int ty = 0; ty < tilesPerSide; ++ty) {
+            for (int tx = 0; tx < tilesPerSide; ++tx) {
+                if (changed && !changed[ty * tilesPerSide + tx]) continue;
+                const int px0 = tx * cells * f;
+                const int py0 = ty * cells * f;
+                const int px1 = px0 + cells * f;
+                const int py1 = py0 + cells * f;
+                for (int py = py0; py < py1; ++py) {
+                    const float cy = (static_cast<float>(py) + 0.5f) * inv - 0.5f;  // bilinear between cell centres
+                    const int y0 = std::clamp(static_cast<int>(std::floor(cy)), 0, size - 1);
+                    const int y1 = std::min(y0 + 1, size - 1);
+                    const float ay = std::clamp(cy - static_cast<float>(y0), 0.0f, 1.0f);
+                    for (int px = px0; px < px1; ++px) {
+                        const float cx = (static_cast<float>(px) + 0.5f) * inv - 0.5f;
+                        const int x0 = std::clamp(static_cast<int>(std::floor(cx)), 0, size - 1);
+                        const int x1 = std::min(x0 + 1, size - 1);
+                        const float ax = std::clamp(cx - static_cast<float>(x0), 0.0f, 1.0f);
+                        const float a = heights[static_cast<std::size_t>(y0) * size + x0];
+                        const float b = heights[static_cast<std::size_t>(y0) * size + x1];
+                        const float c = heights[static_cast<std::size_t>(y1) * size + x0];
+                        const float d = heights[static_cast<std::size_t>(y1) * size + x1];
+                        m_flow[Index(px, py)] = (a + (b - a) * ax) + ((c + (d - c) * ax) - (a + (b - a) * ax)) * ay;
+                    }
+                }
+                MarkRect(px0, py0, px1 - 1, py1 - 1, 8);
+            }
+        }
+    }
+
+    void Layer::SetFlowLook(float alpha, float bump, float tint)
+    {
+        alpha = std::clamp(alpha, 0.0f, 4.0f);
+        bump = std::clamp(bump, 0.0f, 10.0f);
+        tint = std::clamp(tint, 0.0f, 1.0f);
+        if (alpha == m_flowAlpha && bump == m_flowBump && tint == m_flowTint) return;
+        m_flowAlpha = alpha;
+        m_flowBump = bump;
+        m_flowTint = tint;
+        if (!m_flow.empty()) m_dirty.fill(1);
     }
 
     void Layer::SetAlpha(float alpha)
@@ -220,6 +286,27 @@ namespace DS::Film
     void SetNormalMapsEnabled(bool on)
     {
         g_normalsOn = on;
+    }
+
+    void SetSpecMapsEnabled(bool on)
+    {
+        g_specOn = on;
+    }
+
+    void SetGlossCompensation(int surface, bool on)
+    {
+        auto& c = CanvasOf(surface);
+        if (c.glossComp == on) return;
+        c.glossComp = on;
+        for (auto& layer : c.layers) layer.SetGlossComp(on);  // (re-renders the layer's tiles)
+    }
+
+    void SetPremultiplied(int surface, bool on)
+    {
+        auto& c = CanvasOf(surface);
+        if (c.premul == on) return;
+        c.premul = on;
+        c.recomposite = true;
     }
 
     void Layer::BeginFrame()
@@ -361,7 +448,8 @@ namespace DS::Film
         for (int y = 0; y < sh; ++y) {
             const int gy = std::clamp(ry0 + y - 1, 0, kN - 1);
             for (int x = 0; x < sw; ++x) {
-                const float v = m_view[Index(std::clamp(rx0 + x - 1, 0, kN - 1), gy)];
+                const auto vi = Index(std::clamp(rx0 + x - 1, 0, kN - 1), gy);
+                const float v = m_view[vi];
                 src[static_cast<std::size_t>(y) * static_cast<std::size_t>(sw) + static_cast<std::size_t>(x)] = v;
                 peak = std::max(peak, v);
             }
@@ -381,8 +469,37 @@ namespace DS::Film
             }
         }
         const auto byte = [](float value) { return static_cast<std::uint32_t>(std::clamp(value, 0.0f, 255.0f) + 0.5f); };
-        if (peak <= 0.012f && m_wetAmount <= 0.0f) {  // no film anywhere near this tile: it is just transparent
-            for (int gy = y0; gy < y0 + kTile; ++gy) std::fill_n(m_pixels.begin() + static_cast<std::ptrdiff_t>(Index(x0, gy)), kTile, 0u);
+        // the flow map (SetFlow): a smooth wet sheen, drawn under the drops at the end (the mode hands it over already smooth; the film only upsamples it)
+        thread_local std::vector<float> fw;
+        bool hasFlow = false;
+        thread_local std::vector<float> pm;  // where the sheen is drawn: the skin up to the island edges and a little past them (the draw mask stops ~2 px short of an edge: a bare line at every seam)
+        if (!m_flow.empty()) {
+            fw.assign(size, 0.0f);
+            pm.assign(size, 0.0f);
+            const auto& padRaster = DS::Field::Get(m_surface).PaddedTriRaster();
+            // only the tile and 3 px around it: the sheen is drawn on the tile and its slope looks 2 px out (the whole padded region cost ~12 % of the tile time)
+            const int fy0 = std::max(0, y0 - ry0 - 3);
+            const int fy1 = std::min(h, y0 - ry0 + kTile + 3);
+            const int fx0 = std::max(0, x0 - rx0 - 3);
+            const int fx1 = std::min(w, x0 - rx0 + kTile + 3);
+            for (int y = fy0; y < fy1; ++y) {
+                for (int x = fx0; x < fx1; ++x) {
+                    const int gx = rx0 + x;
+                    const int gy = ry0 + y;
+                    const bool in = padRaster.empty() ? km[at(x, y)] > 0.0f : padRaster[static_cast<std::size_t>(gy / kScale) * kSim + static_cast<std::size_t>(gx / kScale)] >= 0;
+                    if (!in) continue;
+                    pm[at(x, y)] = 1.0f;
+                    const float f = m_flow[Index(gx, gy)];
+                    fw[at(x, y)] = f;
+                    hasFlow = hasFlow || f > 0.004f;
+                }
+            }
+        }
+        if (peak <= 0.012f && m_wetAmount <= 0.0f && !hasFlow) {  // no film anywhere near this tile: it is just transparent
+            for (int gy = y0; gy < y0 + kTile; ++gy) {
+                std::fill_n(m_pixels.begin() + static_cast<std::ptrdiff_t>(Index(x0, gy)), kTile, 0u);
+                std::fill_n(m_gloss.begin() + static_cast<std::ptrdiff_t>(Index(x0, gy)), kTile, std::uint8_t{ 0 });
+            }
             if (!m_slope.empty()) {
                 for (int gy = y0; gy < y0 + kTile; ++gy) std::fill_n(m_slope.begin() + static_cast<std::ptrdiff_t>(Index(x0, gy) * 2), kTile * 2, std::int16_t{ 0 });
             }
@@ -418,8 +535,9 @@ namespace DS::Film
                         if (tri < 0) continue;
                         const float soft = std::clamp((m_wetZ - field.CenterZ(tri)) / 8.0f + 0.5f, 0.0f, 1.0f);  // a soft water line
                         if (soft <= 0.0f) continue;
-                        const float vary = std::clamp(0.85f + 0.15f * g_mott[NoiseIndex(gx / kScale, gy / kScale)], 0.5f, 1.0f);
-                        hw[at(x, y)] = std::max(hw[at(x, y)], 0.05f * m_wetAmount * soft * vary);
+                        // an even film: the noise that used to vary its thickness (by 15 %) showed in game as dark and light cloud patches over the whole skin (film dump from the game,
+                        // 2026-11-11), because the film's alpha depends steeply on its thickness; the water line (`soft`) is the only variation left
+                        hw[at(x, y)] = std::max(hw[at(x, y)], 0.05f * m_wetAmount * soft);
                     }
                 }
             }
@@ -489,17 +607,30 @@ namespace DS::Film
 
         const bool hasCore = look.coreColor[0] + look.coreColor[1] + look.coreColor[2] > 0.0f;
 
-        // the film itself: translucent body + bright rim along edges and ridges + wet glints
-        for (int y = 1; y < h - 1; ++y) {
-            for (int x = 1; x < w - 1; ++x) {
+        // the film itself: translucent body + bright rim along edges and ridges + wet glints. Only where the output needs it: the tile, and around it as far as the halo
+        // blur reaches (two rounds of a 13-wide box = 12 px); the rest of the padded region was shaded for nothing (~28 % of the pixel work)
+        const int reach = look.haloAlpha > 0.0f ? 13 : 1;
+        const int sx0 = std::max(1, x0 - rx0 - reach);
+        const int sy0 = std::max(1, y0 - ry0 - reach);
+        const int sx1 = std::min(w - 1, x0 - rx0 + kTile + reach);
+        const int sy1 = std::min(h - 1, y0 - ry0 + kTile + reach);
+        for (int y = sy0; y < sy1; ++y) {
+            for (int x = sx0; x < sx1; ++x) {
                 const float v = hw[at(x, y)];
                 if (v <= 0.012f) continue;
                 const float gxv = (hn(x + 1, y - 1, v) + 2 * hn(x + 1, y, v) + hn(x + 1, y + 1, v) - hn(x - 1, y - 1, v) - 2 * hn(x - 1, y, v) - hn(x - 1, y + 1, v)) / 8.0f * kScaleF;
                 const float gyv = (hn(x - 1, y + 1, v) + 2 * hn(x, y + 1, v) + hn(x + 1, y + 1, v) - hn(x - 1, y - 1, v) - 2 * hn(x, y - 1, v) - hn(x + 1, y - 1, v)) / 8.0f * kScaleF;
                 const float gm = std::sqrt(gxv * gxv + gyv * gyv);
                 if (wantNormals) {
-                    slx[at(x, y)] = gxv;
-                    sly[at(x, y)] = gyv;
+                    // Water: a thin trail (thickness ~0.4, a pixel or two wide) is all slope, so the engine's light made a white hairline along it (seen in game 2026-11-10).
+                    // The normal map only gets slopes next to something thick (a bead or a runner head within 2 px): a trail stays flat for the lights and shows as a faint wet line.
+                    float slopeKeep = 1.0f;
+                    if (look.creamStart <= 0.0f && x >= 2 && y >= 2 && x < w - 2 && y < h - 2) {  // (the tile edge keeps its slope)
+                        const float around = std::max({ hn(x - 2, y, v), hn(x + 2, y, v), hn(x, y - 2, v), hn(x, y + 2, v), hn(x - 2, y - 2, v), hn(x + 2, y + 2, v), hn(x - 2, y + 2, v), hn(x + 2, y - 2, v), v });
+                        slopeKeep = std::clamp((around - 0.45f) / 0.35f, 0.0f, 1.0f);
+                    }
+                    slx[at(x, y)] = gxv * slopeKeep;
+                    sly[at(x, y)] = gyv * slopeKeep;
                 }
                 if (look.creamStart <= 0.0f && look.filmAlpha > 0.0f && gm < 0.004f && v < 0.07f) {
                     // flat thin film (most of a soaked body): just the wet-skin tint, none of the drop shading
@@ -546,21 +677,22 @@ namespace DS::Film
                     const float tilt = std::sqrt(nx * nx + ny * ny) * nl;  // 0 flat .. 1 on edge
                     const float ndl = (nx * kLightX + ny * kLightY + kLightZ) * nl;
                     const float ndh = (nx * kHalfX + ny * kHalfY + kHalfZ) * nl;
-                    const float shadow = std::clamp((0.62f - ndl) * 1.3f, 0.0f, 1.0f) * std::min(tilt * 1.6f, 1.0f) * std::min(look.shade * 0.28f, 0.6f);
-                    const float spot = std::clamp(std::pow(std::max(ndh, 0.0f), 70.0f) * look.glint * 1.1f, 0.0f, 1.0f) * std::min(v * 6.0f, 1.0f);
-                    const float bounce = std::clamp((0.5f - ndl) * 1.4f, 0.0f, 1.0f) * std::clamp(1.0f - tilt * 2.5f, 0.0f, 1.0f) * std::min(v * 2.0f, 1.0f) * 0.025f;  // light focused through the drop, far side
+                    const float shadow = std::clamp((0.62f - ndl) * 1.3f, 0.0f, 1.0f) * std::min(tilt * 1.6f, 1.0f) * std::min(look.shade * 0.36f, 0.7f);
+                    const float spot = std::clamp(std::pow(std::max(ndh, 0.0f), 70.0f) * look.glint * 1.1f, 0.0f, 1.0f) * std::clamp((v - 0.35f) / 0.4f, 0.0f, 1.0f);  // only a thick bead has the sharp highlight: a thin trail (thickness ~0.4) stays dull, not a white line
+                    const bool clearDrop = look.creamStart < -0.5f;  // a look that asks for a clear drop: no milky brightening of the skin seen through it
+                    const float bounce = std::clamp((0.5f - ndl) * 1.4f, 0.0f, 1.0f) * std::clamp(1.0f - tilt * 2.5f, 0.0f, 1.0f) * std::clamp((v - 0.3f) / 0.4f, 0.0f, 1.0f) * (clearDrop ? 0.04f : 0.16f);  // light focused through the drop: a warm crescent on the far side
                     float acc[3] = { look.haloColor[0] * filmA, look.haloColor[1] * filmA, look.haloColor[2] * filmA };  // the film under everything else
                     float aa = filmA;
                     const auto over = [&](const float colour[3], float alpha) {
                         for (int c = 0; c < 3; ++c) acc[c] = acc[c] * (1.0f - alpha) + colour[c] * alpha;
                         aa = aa * (1.0f - alpha) + alpha;
                     };
-                    const float dark[3] = { 6.0f, 8.0f, 12.0f };
-                    const float lightC[3] = { look.rimColor[0] * 0.8f, look.rimColor[1] * 0.8f, look.rimColor[2] * 0.8f };
-                    const float white[3] = { 255.0f, 255.0f, 255.0f };
+                    const float dark[3] = { 40.0f, 22.0f, 14.0f };  // warm dark: the shadow of a drop on skin is brown, not blue-black
+                    const float lightC[3] = { 255.0f, 205.0f, 160.0f };  // the focused light has the skin's colour
+                    const float white[3] = { 255.0f, 249.0f, 240.0f };  // the light's colour: a very slightly warm white
                     // the drop as a lens: the skin seen through it is a little brighter and warmer in the middle
-                    const float lens = std::clamp(1.0f - tilt * 2.0f, 0.0f, 1.0f) * std::min(v * 1.2f, 1.0f) * 0.07f;
-                    const float warm[3] = { 255.0f, 236.0f, 222.0f };
+                    const float lens = std::clamp(1.0f - tilt * 2.0f, 0.0f, 1.0f) * std::min(v * 1.2f, 1.0f) * (clearDrop ? 0.015f : 0.16f);  // (was 0.07: on skin the drop body is mostly this brighter warm view of the skin itself)
+                    const float warm[3] = { 255.0f, 226.0f, 200.0f };
                     over(rgb, a);  // the drop's own body and rim over the film
                     over(warm, lens);
                     over(dark, shadow);
@@ -579,8 +711,16 @@ namespace DS::Film
         blur = af;
         float maxA = 0.0f;
         for (const float a : af) maxA = std::max(maxA, a);
+        // Only the rows the tile's output needs are blurred (round 1: the tile +-12 rows, round 2: +-6), and the vertical passes go row by row with one running sum per
+        // column (a column walk through the region missed the cache): same result as blurring the whole padded region, a fraction of the work.
+        thread_local std::vector<float> colSum;
+        const int oy0 = y0 - ry0;
+        const int oy1 = oy0 + kTile;
         for (int round = 0; round < (look.haloAlpha > 0.0f && maxA > 1e-4f ? 2 : 0); ++round) {
-            for (int y = 0; y < h; ++y) {
+            const int need = round == 0 ? 6 : 0;  // rows of this round's output beyond the tile
+            const int ya = std::max(0, oy0 - need - 6);
+            const int yb = std::min(h, oy1 + need + 6);
+            for (int y = ya; y < yb; ++y) {  // horizontal: rows that the vertical pass below reads
                 const float* row = &blur[at(0, y)];
                 float* out = &tmp[at(0, y)];
                 float sum = 0;
@@ -590,17 +730,27 @@ namespace DS::Film
                     sum += row[std::min(x + 7, w - 1)] - row[std::max(x - 6, 0)];
                 }
             }
-            for (int x = 0; x < w; ++x) {
-                float sum = 0;
-                for (int k = -6; k <= 6; ++k) sum += tmp[at(x, std::clamp(k, 0, h - 1))];
-                for (int y = 0; y < h; ++y) {
-                    blur[at(x, y)] = sum * (1.0f / 13.0f);
-                    sum += tmp[at(x, std::min(y + 7, h - 1))] - tmp[at(x, std::max(y - 6, 0))];
+            const int va = std::max(0, oy0 - need);
+            const int vb = std::min(h, oy1 + need);
+            colSum.assign(static_cast<std::size_t>(w), 0.0f);
+            for (int k = -6; k <= 6; ++k) {
+                const float* row = &tmp[at(0, std::clamp(va + k, 0, h - 1))];
+                for (int x = 0; x < w; ++x) colSum[static_cast<std::size_t>(x)] += row[x];
+            }
+            for (int y = va; y < vb; ++y) {
+                float* out = &blur[at(0, y)];
+                const float* add = &tmp[at(0, std::min(y + 7, h - 1))];
+                const float* sub = &tmp[at(0, std::max(y - 6, 0))];
+                for (int x = 0; x < w; ++x) {
+                    out[x] = colSum[static_cast<std::size_t>(x)] * (1.0f / 13.0f);
+                    colSum[static_cast<std::size_t>(x)] += add[x] - sub[x];
                 }
             }
         }
 
         const auto& padRaster = DS::Field::Get(m_surface).PaddedTriRaster();
+        // the opacity of plain wet skin (the wet film plus its halo): the gloss map counts anything at or above it as fully wet
+        const float wetBase = look.filmAlpha > 0.0f ? look.filmAlpha + (1.0f - look.filmAlpha) * look.haloAlpha * std::clamp(1.8f * look.filmAlpha, 0.0f, 1.0f) : 0.1f;
         for (int gy = y0; gy < y0 + kTile; ++gy) {
             for (int gx = x0; gx < x0 + kTile; ++gx) {
                 const int x = gx - rx0;
@@ -609,16 +759,45 @@ namespace DS::Film
                 // the wet darkening runs up to the island edge and a little past it (the padded mask; the draw mask stops ~2 px short, which left a light line at every seam)
                 const bool inPad = padRaster.empty() ? keep[KeepIndex(gx, gy)] != 0 : padRaster[static_cast<std::size_t>(gy / kScale) * kSim + static_cast<std::size_t>(gx / kScale)] >= 0;
                 const float halo = inPad ? look.haloAlpha * std::clamp(blur[at(x, y)] * 1.8f, 0.0f, 1.0f) : 0.0f;
-                const float aOut = aF + halo * (1.0f - aF);
+                // the flow's sheen: even wet skin wherever there is water (it saturates at a thin film, so a sheet, a film and a stream all read as the same wet skin),
+                // a little more over a stream; the streams themselves show through the normal map (the engine's lights), not through colour
+                float sheen = 0.0f;
+                if (hasFlow) {
+                    const float f = fw[at(x, y)];
+                    const float t = std::clamp((f - 0.004f) / 0.025f, 0.0f, 1.0f);
+                    const float s = std::clamp((f - 0.15f) / 0.5f, 0.0f, 1.0f);
+                    // the same wet skin as the wet film draws on the other surfaces (its film plus its own halo): otherwise the body and the hands / face
+                    // differ in tone and the wrist and the neck show as seams (game test 2026-11-12). No wet film in this look: a plain faint sheen
+                    sheen = std::min(m_flowAlpha * wetBase * (t * t * (3.0f - 2.0f * t)) * (1.0f + 0.5f * s), 1.0f);
+                }
+                const float under = halo + sheen * (1.0f - halo);  // the halo and the sheen are both wet skin under the drops
+                const float aOut = aF + under * (1.0f - aF);
                 float out[3] = { 0, 0, 0 };
                 if (aOut > 1e-4f) {
-                    for (int c = 0; c < 3; ++c) out[c] = (rgbF[at(x, y) * 3 + static_cast<std::size_t>(c)] * aF + look.haloColor[c] * (halo * (1.0f - aF))) / aOut;
+                    for (int c = 0; c < 3; ++c) {
+                        const float sheenC = look.haloColor[c] + (look.rimColor[c] - look.haloColor[c]) * m_flowTint;
+                        const float underC = under > 1e-6f ? (look.haloColor[c] * halo + sheenC * sheen * (1.0f - halo)) / under : 0.0f;
+                        out[c] = (rgbF[at(x, y) * 3 + static_cast<std::size_t>(c)] * aF + underC * (under * (1.0f - aF))) / aOut;
+                    }
+                }
+                if (wantNormals && hasFlow && x > 1 && y > 1 && x < w - 2 && y < h - 2 && pm[at(x, y)] > 0.0f) {
+                    // the flow's thickness bends the normal map (smooth: from the blurred map), so the lights catch the streams
+                    const float f = fw[at(x, y)];
+                    const auto fn = [&](int xx, int yy) { return pm[at(xx, yy)] > 0.0f ? fw[at(xx, yy)] : f; };
+                    slx[at(x, y)] += (fn(x + 2, y) - fn(x - 2, y)) * 0.25f * kScaleF * m_flowBump;  // (+-2 px: the map is bilinear from 4 px cells)
+                    sly[at(x, y)] += (fn(x, y + 2) - fn(x, y - 2)) * 0.25f * kScaleF * m_flowBump;
                 }
                 if (wantNormals) {
                     constexpr float kFix = 8192.0f;
                     m_slope[Index(gx, gy) * 2] = static_cast<std::int16_t>(std::clamp(slx[at(x, y)] * kFix, -32000.0f, 32000.0f));
                     m_slope[Index(gx, gy) * 2 + 1] = static_cast<std::int16_t>(std::clamp(sly[at(x, y)] * kFix, -32000.0f, 32000.0f));
                 }
+                // the gloss map: wet skin (film, sheen, halo) shines, a drop or a stream a little more; dry skin not at all
+                const float wet = std::clamp(aOut / std::max(wetBase, 0.02f), 0.0f, 1.0f);
+                // the engine scales the overlay's shine by its opacity (normal blend): the gloss is divided by it here and the material's specular scale is raised by
+                // 1 / kGlossRef (MaterialSpec), so thin wet skin shines as much as a drop (with the premultiplied blend that is already so)
+                const float comp = m_glossComp ? std::min(1.0f, kGlossRef / std::max(aOut, kGlossRef)) : 1.0f;
+                m_gloss[Index(gx, gy)] = static_cast<std::uint8_t>(byte(wet * (0.75f + 0.25f * std::clamp(aF * 4.0f, 0.0f, 1.0f)) * comp * 255.0f));
                 m_pixels[Index(gx, gy)] = (byte(aOut * 255.0f) << 24) | (byte(out[2] * look.brightness) << 16) | (byte(out[1] * look.brightness) << 8) | byte(out[0] * look.brightness);
             }
         }
@@ -769,6 +948,18 @@ namespace DS::Film
         c.recomposite = true;
     }
 
+    void Recomposite(int surface)
+    {
+        CanvasOf(surface).recomposite = true;
+    }
+
+    void Rebind(int surface, const std::uint8_t* keepMask)
+    {
+        auto& c = CanvasOf(surface);
+        for (auto* layer : c.order) layer->Rebind(keepMask);
+        c.recomposite = true;
+    }
+
     const std::uint32_t* Pixels(int surface)
     {
         return CanvasOf(surface).final.data();
@@ -778,6 +969,20 @@ namespace DS::Film
     {
         const auto& c = CanvasOf(surface);
         return c.normal.empty() ? nullptr : c.normal.data();
+    }
+
+    void TakePartMs(double out[4])
+    {
+        for (int i = 0; i < 4; ++i) {
+            out[i] = g_partMs[i];
+            g_partMs[i] = 0.0;
+        }
+    }
+
+    const std::uint32_t* SpecPixels(int surface)
+    {
+        const auto& c = CanvasOf(surface);
+        return c.spec.empty() ? nullptr : c.spec.data();
     }
 
     const std::uint8_t* ChangedTiles(int surface)
@@ -792,7 +997,7 @@ namespace DS::Film
             const auto& look = (*it)->GetLook();
             if (look.specScale > 0.0f && look.specPower > 0.0f) {
                 *power = look.specPower;
-                *scale = look.specScale * (*it)->Alpha();
+                *scale = look.specScale * (*it)->Alpha() * (c.glossComp ? 1.0f / kGlossRef : 1.0f);  // (the gloss map is divided by the film's opacity: see RenderTile)
                 return true;
             }
         }
@@ -814,6 +1019,13 @@ namespace DS::Film
             allTiles = true;
         }
         if (!wantNormals && !c.normal.empty()) c.normal.clear();
+        const bool wantSpec = g_specOn && wantNormals;
+        if (wantSpec && c.spec.empty()) {
+            c.spec.assign(c.final.size(), 0xFF000000u);
+            allTiles = true;
+        }
+        if (!wantSpec && !c.spec.empty()) c.spec.clear();
+        const auto p0 = std::chrono::steady_clock::now();
         for (auto* layer : c.order) {
             if (layer->Render()) any = true;
             if (layer->AlphaChanged()) {
@@ -831,7 +1043,10 @@ namespace DS::Film
             if (changed) tiles.push_back(t);
         }
         for (auto* layer : c.order) layer->ClearChanged();
-        const bool single = c.order.size() == 1 && c.order[0]->Alpha() >= 1.0f;
+        const auto p1 = std::chrono::steady_clock::now();
+        g_partMs[0] += std::chrono::duration<double, std::milli>(p1 - p0).count();
+        const bool single = c.order.size() == 1 && c.order[0]->Alpha() >= 1.0f && !c.premul;
+        const bool premul = c.premul;
         const auto byte = [](float value) { return static_cast<std::uint32_t>(std::clamp(value, 0.0f, 255.0f) + 0.5f); };
         ParallelTiles(tiles, [&](int t) {
             const int tx = t % kTiles;
@@ -863,13 +1078,37 @@ namespace DS::Film
                         c.final[i] = 0;
                         continue;
                     }
+                    if (premul) {  // (r, g, b are already the colour x alpha)
+                        c.final[i] = (byte(a * 255.0f) << 24) | (byte(b) << 16) | (byte(g) << 8) | byte(r);
+                        continue;
+                    }
                     c.final[i] = (byte(a * 255.0f) << 24) | (byte(b / a) << 16) | (byte(g / a) << 8) | byte(r / a);
                 }
             }
         });
+        const auto p2 = std::chrono::steady_clock::now();
+        g_partMs[1] += std::chrono::duration<double, std::milli>(p2 - p1).count();
         if (wantNormals) {
             ParallelTiles(tiles, [&](int t) { NormalTile(c, surface, t % kTiles, t / kTiles); });
         }
+        const auto p3 = std::chrono::steady_clock::now();
+        g_partMs[2] += std::chrono::duration<double, std::milli>(p3 - p2).count();
+        if (wantSpec) {  // the gloss map: the wettest layer at each pixel (x its alpha)
+            ParallelTiles(tiles, [&](int t) {
+                const int tx = t % kTiles;
+                const int ty = t / kTiles;
+                for (int y = ty * kTile; y < (ty + 1) * kTile; ++y) {
+                    for (int x = tx * kTile; x < (tx + 1) * kTile; ++x) {
+                        const auto i = Index(x, y);
+                        float g = 0.0f;
+                        for (auto* layer : c.order) g = std::max(g, static_cast<float>(layer->Gloss()[i]) * layer->Alpha());
+                        const auto v = byte(g);
+                        c.spec[i] = (255u << 24) | (v << 16) | (v << 8) | v;
+                    }
+                }
+            });
+        }
+        g_partMs[3] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - p3).count();
         return true;
     }
 }

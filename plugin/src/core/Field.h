@@ -75,6 +75,7 @@ namespace DS::Field
         bool Inner(int x, int y) const;
         bool Keep(int x, int y) const;  // inner dilated by 2 px: where the film may be drawn
         std::int32_t TriAt(int x, int y) const;
+        std::int32_t SeamTwin(int x, int y) const;  // the pixel across the UV seam at the same body position (y * kSize + x), -1 = none
         const std::vector<std::uint8_t>& KeepMask() const { return m_keep; }
 
         // Rest-pose (anatomical) quantities of a triangle: height, front/back facing and how vertical it is when standing.
@@ -98,6 +99,7 @@ namespace DS::Field
         std::vector<std::int32_t> m_triId;
         std::vector<std::int32_t> m_padTri;
         std::vector<std::int16_t> m_smooth;
+        std::vector<std::int32_t> m_twin;  // per pixel near an island edge: SeamTwin
         std::vector<std::uint8_t> m_inner;
         std::vector<std::uint8_t> m_keep;
         std::vector<TriStatic> m_tri;
