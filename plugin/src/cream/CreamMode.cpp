@@ -11,7 +11,9 @@
 //    permanent streak behind and ending in a hanging bulb (instead of a thin wet trail that dries);
 //  - nothing evaporates: the cream stays for StayTime seconds, then fades out (or the clean key wipes it at once).
 //
-// Splash (variant 1, default): a short spray of blobs and spatters over the front of the body and the face.
+// Splash (variant 1, default): a few (3-5) big globs land close together on the face or the upper front of the torso. The impact splays each
+// one out with irregular fingers: fast at first, slowing down, most of it within a third of a second. For a few seconds after that it only
+// changes a little (it keeps widening slowly and sags a bit downhill), and only then, where the skin may drip, it starts to creep down as streaks.
 // Pour (variant 2): a thick stream onto the highest skin that faces up (top of the head / forehead, shoulders, chest), which then runs down.
 namespace
 {
@@ -19,15 +21,24 @@ namespace
 
     struct Settings
     {
-        float splashBlobs = 90.0f;   // blobs per splash at strength 1
-        float splashTime = 0.4f;     // seconds a splash lasts
-        int splashCenters = 2;       // impact spots per splash: the blobs land in a tight cluster around each
-        float splashSpread = 30.0f;  // mm: how far a splash spreads around its impact spot (most of it lands within this)
+        int globsMin = 3;            // big globs per splash: a random number from GlobsMin to GlobsMax
+        int globsMax = 5;
+        float globSize = 7.0f;       // mm: radius of a glob as it lands (each one 75-125 % of this)
+        float splashSpread = 40.0f;  // mm: how far apart the globs of one splash land (around one aim point)
+        float spreadTime = 0.3f;     // seconds the impact takes to splay a glob out with its fingers (fast at first, slowing down)
+        float holdTime = 4.0f;       // seconds a splash then changes only a little before it starts to creep (each glob 75-125 % of this)
+        float holdSpread = 0.15f;    // share of the spreading that still happens slowly during the hold (0 = it stops when the impact is over)
+        float holdSag = 0.3f;        // how far a glob sags downhill during the hold, in its radii (only where the skin may drip)
+        float spread = 1.6f;         // its radius when splayed out, relative to when it landed (it gets flatter as it widens)
+        int fingersMin = 2;          // irregular fingers the impact pushes out of each glob
+        int fingersMax = 5;
+        float fingerLength = 1.2f;   // how far they reach, in glob radii (each 50-150 % of this)
+        int spatters = 2;            // small droplets thrown off around each glob (0 .. this many)
         float pourRate = 38.0f;      // blobs per second while pouring (strength 1)
         float pourTime = 3.0f;       // seconds a pour lasts (strength 1)
         float pourSpread = 7.0f;     // mm: how wide the stream lands around the pour point
-        float faceShare = 0.35f;     // share of a splash that lands on the face (when the face surface is there)
-        float aimHeight = 0.72f;     // splash on the body: where it is aimed, 0 feet .. 1 top of the head
+        float faceShare = 0.6f;      // chance that a splash lands on the face (when the face surface is there); otherwise the upper front of the torso
+        float aimHeight = 0.75f;     // splash on the body: where it is aimed, 0 feet .. 1 top of the head (0.75 = the chest)
         float aimSpread = 0.1f;      // how far around that height the impact spots may be
         float size = 1.0f;           // multiplies blob sizes
         float viscosity = 1.0f;      // higher = holds on steeper skin, creeps slower and not as far
@@ -47,7 +58,7 @@ namespace
         int maxBlobs = 900;
         int maxRunners = 50;
         bool face = true;
-        bool hands = true;
+        bool hands = false;
         bool feet = false;
         // may it run on this surface? The face's gravity field is not reliable (drops were seen running up the face in the rain mode), so there it stays put
         bool dripBody = true;
@@ -69,16 +80,25 @@ namespace
     {
         const DripSim::Ini ini("DripSimCream");
         Settings v;
-        v.splashBlobs = ini.Float("SplashBlobs", v.splashBlobs);
-        v.splashTime = std::max(ini.Float("SplashTime", v.splashTime), 0.05f);
+        v.globsMin = std::clamp(ini.Int("GlobsMin", v.globsMin), 1, 12);
+        v.globsMax = std::clamp(ini.Int("GlobsMax", v.globsMax), v.globsMin, 12);
+        v.globSize = std::max(ini.Float("GlobSize", v.globSize), 0.5f);
+        v.spreadTime = std::max(ini.Float("SpreadTime", v.spreadTime), 0.02f);
+        v.holdTime = std::max(ini.Float("HoldTime", v.holdTime), 0.0f);
+        v.holdSpread = std::clamp(ini.Float("HoldSpread", v.holdSpread), 0.0f, 0.9f);
+        v.holdSag = std::clamp(ini.Float("HoldSag", v.holdSag), 0.0f, 2.0f);
+        v.spread = std::clamp(ini.Float("Spread", v.spread), 1.0f, 4.0f);
+        v.fingersMin = std::clamp(ini.Int("FingersMin", v.fingersMin), 0, 8);
+        v.fingersMax = std::clamp(ini.Int("FingersMax", v.fingersMax), v.fingersMin, 8);
+        v.fingerLength = std::max(ini.Float("FingerLength", v.fingerLength), 0.0f);
+        v.spatters = std::clamp(ini.Int("Spatters", v.spatters), 0, 8);
         v.pourRate = ini.Float("PourRate", v.pourRate);
         v.pourTime = ini.Float("PourTime", v.pourTime);
         v.pourSpread = ini.Float("PourSpread", v.pourSpread);
         v.faceShare = std::clamp(ini.Float("FaceShare", v.faceShare), 0.0f, 1.0f);
         v.aimHeight = ini.Float("AimHeight", v.aimHeight);
         v.aimSpread = std::max(ini.Float("AimSpread", v.aimSpread), 0.02f);
-        v.splashCenters = std::clamp(ini.Int("SplashCenters", v.splashCenters), 1, 8);
-        v.splashSpread = std::max(ini.Float("SplashSpread", v.splashSpread), 2.0f);
+        v.splashSpread = std::max(ini.Float("SplashSpread", v.splashSpread), 0.0f);
         v.size = ini.Float("Size", v.size);
         v.viscosity = std::max(ini.Float("Viscosity", v.viscosity), 0.1f);
         v.opacity = ini.Float("Opacity", v.opacity);
@@ -104,7 +124,7 @@ namespace
         v.dripFeet = ini.Bool("DripFeet", v.dripFeet);
         v.dripFace = ini.Bool("DripFace", v.dripFace);
         g_cfg = v;
-        logger::info("Cream: settings: splash {:.0f} blobs pour {:.0f}/s for {:.1f}s size {:.2f} viscosity {:.2f} opacity {:.2f} gloss {:.2f} stay {:.0f}s", v.splashBlobs, v.pourRate, v.pourTime,
+        logger::info("Cream: settings: splash {}-{} globs of {:.1f} mm, pour {:.0f}/s for {:.1f}s size {:.2f} viscosity {:.2f} opacity {:.2f} gloss {:.2f} stay {:.0f}s", v.globsMin, v.globsMax, v.globSize, v.pourRate, v.pourTime,
             v.size, v.viscosity, v.opacity, v.gloss, v.stayTime);
     }
 
@@ -115,6 +135,7 @@ namespace
         float stretch;  // >= 1: drawn out along ang (a spatter that hit at a slant)
         float ang;
         float lobe;     // direction of the second, smaller lobe (irregular outline)
+        double holdUntil = 0.0;  // it does not start to creep before this time (a fresh splash sits for a moment)
     };
 
     struct Runner
@@ -145,12 +166,9 @@ namespace
     {
         double t = 0;
         double since = 0;       // seconds since the last cream landed
-        float splashLeft = 0;   // blobs of the current splash still to come
-        float splashRate = 0;   // ... per second
         float splashStr = 1;
         float pourLeft = 0;     // seconds of pouring left
         float pourStr = 1;
-        float spawnAcc = 0;
         float pourAcc = 0;
         float checkAcc = 0;
         float alpha = 1;
@@ -160,13 +178,31 @@ namespace
         std::uint64_t frames = 0;
     };
 
-    // where the blobs of the current splash land: a few tight impact spots
-    struct Impact
+    // A glob of a splash while it spreads: drawn fresh every frame (it gets wider and flatter, its fingers grow), stamped for good when it is done.
+    struct Finger
+    {
+        float ang;    // direction in the atlas
+        float len;    // how far it reaches when done, in glob radii
+        float width;  // in glob radii
+        float bend;   // radians it curves by along its length
+        bool down;    // the downhill finger (skin that may drip): its tip carries on as a streak
+    };
+    struct Glob
     {
         std::size_t surf;
         float x, y;
+        float r0;       // px, as it landed
+        float stretch;  // drawn out along ang (the way it was flying)
+        float ang;
+        float lobe;
+        float age = 0;
+        float dur = 1;      // the impact
+        float hold = 0;     // then the hold
+        float sagX = 0;     // downhill direction (atlas, unit), 0 where it may not drip
+        float sagY = 0;
+        std::vector<Finger> fingers;
     };
-    std::vector<Impact> g_impacts;
+    std::vector<Glob> g_globs;
     State g_s;
     std::mt19937 g_rng{ 11u };
 
@@ -287,7 +323,7 @@ namespace
             b.stretch = 1.0f + (b.stretch - 1.0f) * 0.5f;
             DrawBlob(b);  // stamps are max-blended: the old shape stays under the grown one
             const auto here = At(b.x, b.y);
-            if (g_cur->drip && here.steep > 0.04f && here.inner && Radius(b.vol) >= CriticalRadiusMm(here.steep) && static_cast<int>(g_cur->runners.size()) < RunnerCap()) StartRunner(i);
+            if (g_cur->drip && g_s.t >= b.holdUntil && here.steep > 0.04f && here.inner && Radius(b.vol) >= CriticalRadiusMm(here.steep) && static_cast<int>(g_cur->runners.size()) < RunnerCap()) StartRunner(i);
             return;
         }
         if (static_cast<int>(g_cur->blobs.size()) >= BlobCap()) return;
@@ -302,6 +338,7 @@ namespace
         for (std::size_t i = g_cur->blobs.size(); i-- > 0;) {
             if (static_cast<int>(g_cur->runners.size()) >= RunnerCap()) return;
             const Blob& b = g_cur->blobs[i];
+            if (g_s.t < b.holdUntil) continue;
             const auto s = At(b.x, b.y);
             if (s.steep <= 0.04f || !s.inner) continue;
             const float ratio = Radius(b.vol) / CriticalRadiusMm(s.steep);
@@ -320,18 +357,73 @@ namespace
         return &g_surfs.back();
     }
 
-    // A new splash: where it hits. A few impact spots on skin that faces the front (on the body around AimHeight); the blobs then land
-    // in a tight cluster around them instead of all over the front.
-    void ChooseImpacts()
+    DripSim::IHost* g_host = nullptr;
+
+    // The upper front of the torso, not the arms: the body's atlas cannot tell them apart, so this shoots horizontal rays at the live, posed
+    // body around AimHeight from all sides. The hits on skin that faces forward (standing pose) show which way the body faces now; a hit counts
+    // when it came from within ~50 degrees of that front, which leaves out the arms at the sides.
+    bool AimTorso(const Surf& body, float& ox, float& oy)
     {
-        g_impacts.clear();
-        for (int c = 0; c < g_cfg.splashCenters; ++c) {
-            g_cur = PickSurface();
-            const auto* f = g_cur->field;
+        float lo[3];
+        float hi[3];
+        if (!g_host || !g_host->BodyBounds(lo, hi)) return false;
+        const float cx = (lo[0] + hi[0]) * 0.5f;
+        const float cy = (lo[1] + hi[1]) * 0.5f;
+        const float zSpan = hi[2] - lo[2];
+        const float reach = std::max(hi[0] - lo[0], hi[1] - lo[1]) + 50.0f;
+        struct Cand
+        {
+            float x, y, azimuth;
+            bool front;
+        };
+        std::vector<Cand> cands;
+        float fx = 0.0f;
+        float fy = 0.0f;
+        for (int i = 0; i < 64; ++i) {
+            const float th = 6.283f * (static_cast<float>(i) + U(0.0f, 1.0f)) / 64.0f;
+            const float z = lo[2] + zSpan * (g_cfg.aimHeight + U(-1.0f, 1.0f) * g_cfg.aimSpread);
+            const float from[3] = { cx + std::cos(th) * reach, cy + std::sin(th) * reach, z };
+            const float dir[3] = { -std::cos(th), -std::sin(th), 0.0f };
+            DripSim::Hit hit{};
+            if (!g_host->Raycast(from, dir, reach * 2.0f, &hit)) continue;
+            const int px = static_cast<int>(hit.x);
+            const int py = static_cast<int>(hit.y);
+            if (!body.field->Inner(px, py)) continue;
+            const auto tri = body.field->TriAt(px, py);
+            if (tri < 0) continue;
+            const float ny = body.field->NormalY(tri);
+            if (ny > 0.5f) {  // clearly the front: its world normal points where the body faces
+                fx += hit.normal[0];
+                fy += hit.normal[1];
+            }
+            cands.push_back({ hit.x, hit.y, th, ny > 0.2f });
+        }
+        const float fl = std::hypot(fx, fy);
+        if (fl < 1e-4f) return false;
+        const float facing = std::atan2(fy, fx);
+        std::vector<const Cand*> good;
+        for (const auto& c : cands) {
+            if (c.front && std::abs(std::remainder(c.azimuth - facing, 6.283f)) < 0.87f) good.push_back(&c);
+        }
+        if (good.empty()) return false;
+        const Cand* c = good[static_cast<std::size_t>(U(0.0f, static_cast<float>(good.size()) - 0.001f))];
+        ox = c->x;
+        oy = c->y;
+        return true;
+    }
+
+    // where a splash is aimed: the face (FaceShare), otherwise the upper front of the torso; skin that faces the front
+    bool FindAim(Surf*& surf, float& ox, float& oy)
+    {
+        for (int pickSurf = 0; pickSurf < 4; ++pickSurf) {
+            surf = PickSurface();
+            g_cur = surf;
+            if (surf->name == "body" && AimTorso(*surf, ox, oy)) return true;
+            const auto* f = surf->field;
             const int size = f->Size();
-            const bool body = g_cur->name == "body";
+            const bool body = surf->name == "body";
             const float zSpan = std::max(f->ZMax() - f->ZMin(), 1e-3f);
-            for (int attempt = 0; attempt < 400; ++attempt) {
+            for (int attempt = 0; attempt < 600; ++attempt) {
                 const float x = U(0.0f, static_cast<float>(size - 1));
                 const float y = U(0.0f, static_cast<float>(size - 1));
                 if (!f->Inner(static_cast<int>(x), static_cast<int>(y))) continue;
@@ -344,44 +436,203 @@ namespace
                     accept *= std::exp(-d * d);
                 }
                 if (Chance() > accept) continue;
-                g_impacts.push_back({ static_cast<std::size_t>(g_cur - g_surfs.data()), x, y });
+                ox = x;
+                oy = y;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int RandInt(int lo, int hi) { return std::uniform_int_distribution<int>(lo, std::max(lo, hi))(g_rng); }
+
+    // A splash lands: GlobsMin..GlobsMax big globs close together around one aim point, each with its own fingers to grow.
+    void SpawnSplash(float strength)
+    {
+        Surf* surf = nullptr;
+        float ax = 0.0f;
+        float ay = 0.0f;
+        if (!FindAim(surf, ax, ay)) return;
+        g_cur = surf;
+        const auto* f = surf->field;
+        const auto centre = At(ax, ay);
+        const int n = RandInt(g_cfg.globsMin, g_cfg.globsMax);
+        const float str = 0.6f + 0.4f * std::min(strength, 1.5f);
+        for (int i = 0; i < n; ++i) {
+            float x = ax;
+            float y = ay;
+            for (int attempt = 0; attempt < 12; ++attempt) {  // around the aim point, the first one right on it
+                const float distMm = i == 0 ? 0.0f : g_cfg.splashSpread * std::min(std::abs(Gauss()) * 0.5f, 1.0f);
+                const float dir = U(0.0f, 6.283f);
+                const float px = ax + std::cos(dir) * distMm / centre.mmpx;
+                const float py = ay + std::sin(dir) * distMm / centre.mmpx;
+                if (!f->Inner(static_cast<int>(px), static_cast<int>(py))) continue;
+                x = px;
+                y = py;
                 break;
             }
+            const auto s = At(x, y);
+            const float rMm = g_cfg.globSize * U(0.75f, 1.25f) * g_cfg.size * str;
+            Glob g;
+            g.surf = static_cast<std::size_t>(surf - g_surfs.data());
+            g.x = x;
+            g.y = y;
+            g.r0 = rMm / std::max(s.mmpx, 1e-3f);
+            g.stretch = U(1.0f, 1.5f);
+            g.ang = U(0.0f, 6.283f);
+            g.lobe = U(0.0f, 6.283f);
+            g.dur = g_cfg.spreadTime * U(0.8f, 1.2f);  // the impact: fast, whatever the viscosity
+            g.hold = g_cfg.holdTime * U(0.75f, 1.25f);
+            if (surf->drip && s.steep > 0.1f) {
+                const float dl = std::hypot(s.dx, s.dy);
+                if (dl > 1e-4f) {
+                    const float k = std::min(s.steep * 1.3f, 1.0f) / dl;
+                    g.sagX = s.dx * k;
+                    g.sagY = s.dy * k;
+                }
+            }
+            const int fingers = RandInt(g_cfg.fingersMin, g_cfg.fingersMax);
+            const float base = U(0.0f, 6.283f);
+            for (int k = 0; k < fingers; ++k) {  // spread round the glob, not bunched up
+                const float ang = base + 6.283f * (static_cast<float>(k) + U(-0.3f, 0.3f)) / static_cast<float>(std::max(fingers, 1));
+                g.fingers.push_back({ ang, g_cfg.fingerLength * U(0.5f, 1.5f), U(0.3f, 0.5f), U(-0.5f, 0.5f), false });
+            }
+            // where the skin may drip, the finger nearest to downhill becomes the long one that turns into a streak
+            if (surf->drip && s.steep > 0.1f && (s.dx != 0.0f || s.dy != 0.0f)) {
+                const float down = std::atan2(s.dy, s.dx);
+                Finger* best = nullptr;
+                float bestDiff = 10.0f;
+                for (auto& fg : g.fingers) {
+                    const float diff = std::abs(std::remainder(fg.ang - down, 6.283f));
+                    if (diff < bestDiff) bestDiff = diff, best = &fg;
+                }
+                if (!best || bestDiff > 0.8f) {
+                    g.fingers.push_back({ down, 0.0f, 0.0f, 0.0f, true });
+                    best = &g.fingers.back();
+                }
+                best->ang = down;
+                best->bend = 0.0f;
+                best->len = g_cfg.fingerLength * U(1.5f, 2.5f) * std::min(s.steep * 1.5f, 1.0f);
+                best->width = U(0.4f, 0.5f);
+                best->down = true;
+            }
+            // a few small droplets thrown off as it hit
+            const int spat = RandInt(0, g_cfg.spatters);
+            for (int k = 0; k < spat; ++k) {
+                const float dir = U(0.0f, 6.283f);
+                const float dist = g.r0 * U(1.5f, 2.8f);
+                const float px = x + std::cos(dir) * dist;
+                const float py = y + std::sin(dir) * dist;
+                if (f->Inner(static_cast<int>(px), static_cast<int>(py))) Land(px, py, rMm * U(0.12f, 0.25f), U(1.0f, 1.8f), dir);
+            }
+            g_globs.push_back(std::move(g));
+        }
+        logger::info("Cream: splash {:.2f} on {}: {} globs", strength, surf->name, n);
+    }
+
+    // One glob at spread e (0 as it landed .. 1 done): a core that widens and flattens (same volume over a bigger area), a second lobe for an
+    // uneven outline, and the fingers grown to e of their length, each ending in a little bulb where the cream gathers.
+    void DrawGlob(const Glob& g, float e, float sag, bool permanent)
+    {
+        g_cur = &g_surfs[g.surf];
+        const auto* f = g_cur->field;
+        const float grow = 1.0f + (g_cfg.spread - 1.0f) * e;
+        const float r = g.r0 * grow;
+        const float h = std::max(1.35f / (1.0f + 0.5f * (grow * grow - 1.0f)), 0.75f);
+        const float k = std::sqrt(g.stretch);
+        g_cur->layer->Stamp(g.x, g.y, r * k, r / k, g.ang, h, 0.5f, permanent);
+        if (sag > 0.0f && (g.sagX != 0.0f || g.sagY != 0.0f)) {
+            // the heavy lower part slumps: a second, slightly smaller body further downhill, joined to the first
+            const float off = sag * g.r0;
+            const float sx = g.x + g.sagX * off;
+            const float sy = g.y + g.sagY * off;
+            if (f->Inner(static_cast<int>(sx), static_cast<int>(sy))) {
+                const float da = std::atan2(g.sagY, g.sagX);
+                g_cur->layer->Stamp((g.x + sx) * 0.5f, (g.y + sy) * 0.5f, r * 0.85f + off * 0.5f, r * 0.8f, da, h * 0.97f, 0.5f, permanent);
+                g_cur->layer->Stamp(sx, sy, r * 0.8f, r * 0.75f, da, h, 0.5f, permanent);
+            }
+        }
+        g_cur->layer->Stamp(g.x + std::cos(g.lobe) * r * 0.45f, g.y + std::sin(g.lobe) * r * 0.45f, r * 0.75f, r * 0.6f, g.lobe, h * 0.95f, 0.5f, permanent);
+        for (const auto& fg : g.fingers) {
+            const float len = fg.len * g.r0 * e;
+            const float w0 = fg.width * g.r0;
+            if (len < 0.5f || w0 < 0.5f) continue;
+            const int pieces = std::max(2, static_cast<int>(std::ceil(len / (0.35f * w0))));
+            float px = g.x;
+            float py = g.y;
+            for (int i = 1; i <= pieces; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(pieces);
+                const float a = fg.ang + fg.bend * t;
+                const float d = r * 0.6f + len * t;
+                const float nx = g.x + std::cos(a) * d;
+                const float ny = g.y + std::sin(a) * d;
+                if (!f->Inner(static_cast<int>(nx), static_cast<int>(ny))) break;
+                px = nx;
+                py = ny;
+                const float w = w0 * (1.0f - 0.35f * t) * grow;
+                g_cur->layer->Stamp(px, py, w, w * 0.85f, a, h * (1.0f - 0.2f * t), 0.5f, permanent);
+            }
+            const float tip = w0 * 0.85f * grow;
+            g_cur->layer->Stamp(px, py, tip, tip, 0.0f, h, 0.5f, permanent);
         }
     }
 
-    // One blob of a splash, around one impact spot: big and round in the middle, smaller and drawn out further away, flying outward
-    // (spatters point away from the impact, as in a real splash), with a few small droplets thrown on ahead of it.
-    void SplashHit()
+    // where a finger's tip is now (the end of its last stamp on the skin)
+    void FingerTip(const Glob& g, const Finger& fg, float& tx, float& ty)
     {
-        if (g_impacts.empty()) return;
-        const Impact& hit = g_impacts[static_cast<std::size_t>(U(0.0f, static_cast<float>(g_impacts.size()) - 0.001f))];
-        g_cur = &g_surfs[hit.surf];
-        const auto* f = g_cur->field;
-        const auto c = At(hit.x, hit.y);
-        // distance from the impact: most within ~SplashSpread / 2, a tail out to SplashSpread
-        const float distMm = g_cfg.splashSpread * std::min(std::abs(Gauss()) * 0.45f, 1.2f);
-        const float dir = U(0.0f, 6.283f);
-        const float x = hit.x + std::cos(dir) * distMm / c.mmpx;
-        const float y = hit.y + std::sin(dir) * distMm / c.mmpx;
-        if (!f->Inner(static_cast<int>(x), static_cast<int>(y))) return;
-        const auto s = At(x, y);
-        const float closeness = std::exp(-2.0f * distMm / g_cfg.splashSpread);  // 1 at the impact .. small at the edge
-        const float str = 0.6f + 0.4f * g_s.splashStr;
-        const float rMm = (0.7f + 2.6f * closeness) * U(0.7f, 1.3f) * g_cfg.size * str;
-        const float dx = std::cos(dir);
-        const float dy = std::sin(dir);
-        const float stretch = 1.0f + (1.0f - closeness) * U(0.3f, 1.8f);
-        Land(x, y, rMm, stretch, dir);
-        if (closeness > 0.6f) return;  // the middle is one thick mass, no spatters
-        const int spatters = static_cast<int>(U(0.0f, 3.0f));
-        float reach = rMm * std::sqrt(stretch);
-        for (int i = 0; i < spatters; ++i) {
-            reach += U(1.2f, 3.0f) * rMm * 0.6f;
-            const float px = x + dx * reach / s.mmpx + Gauss() * 0.6f;
-            const float py = y + dy * reach / s.mmpx + Gauss() * 0.6f;
-            if (!f->Inner(static_cast<int>(px), static_cast<int>(py))) break;
-            Land(px, py, rMm * U(0.2f, 0.4f), U(1.0f, 1.6f), dir);
+        const float r = g.r0 * g_cfg.spread;
+        const float a = fg.ang + fg.bend;
+        tx = g.x + std::cos(a) * (r * 0.6f + fg.len * g.r0);
+        ty = g.y + std::sin(a) * (r * 0.6f + fg.len * g.r0);
+        if (!g_surfs[g.surf].field->Inner(static_cast<int>(tx), static_cast<int>(ty))) tx = g.x, ty = g.y;
+    }
+
+    // The fresh globs: the impact splays them out (fast, then slowing), the hold lets them widen a little more and sag; then each is stamped
+    // for good and its cream counts as blobs (its middle, its sagged lower part and the tip of its downhill finger), which, on skin that may
+    // drip, creep on as streaks when they are heavy.
+    void UpdateGlobs(float dt)
+    {
+        for (std::size_t i = 0; i < g_globs.size();) {
+            Glob& g = g_globs[i];
+            g.age += dt;
+            const float impact = 1.0f - g_cfg.holdSpread;  // the share of the spreading the impact does
+            float e;
+            float sag = 0.0f;
+            if (g.age < g.dur) {
+                const float t = g.age / g.dur;
+                e = impact * (1.0f - (1.0f - t) * (1.0f - t));  // fast at first, slowing down
+            } else {
+                const float u = std::min((g.age - g.dur) / std::max(g.hold, 1e-3f), 1.0f);
+                const float slow = 1.0f - (1.0f - u) * (1.0f - u);
+                e = impact + (1.0f - impact) * slow;  // carries on where the impact left off, ever slower
+                sag = g_cfg.holdSag * u * u;          // the slump starts gently and grows
+            }
+            if (g.age < g.dur + g.hold) {
+                DrawGlob(g, e, sag, false);
+                ++i;
+                continue;
+            }
+            sag = g_cfg.holdSag;
+            DrawGlob(g, 1.0f, sag, true);
+            g_cur = &g_surfs[g.surf];
+            const auto s = At(g.x, g.y);
+            const double hold = g_s.t;  // the hold is over: from now on it may creep
+            const float rMid = g.r0 * g_cfg.spread * s.mmpx * 0.45f;
+            const float mx = g.x + g.sagX * sag * g.r0;
+            const float my = g.y + g.sagY * sag * g.r0;
+            const bool sagged = (g.sagX != 0.0f || g.sagY != 0.0f) && sag > 0.0f && g_cur->field->Inner(static_cast<int>(mx), static_cast<int>(my));
+            if (static_cast<int>(g_cur->blobs.size()) < BlobCap()) {
+                g_cur->blobs.push_back({ sagged ? mx : g.x, sagged ? my : g.y, rMid * rMid, 1.0f, 0.0f, U(0.0f, 6.283f), hold });
+            }
+            for (const auto& fg : g.fingers) {
+                if (!fg.down) continue;
+                float bx = g.x;
+                float by = g.y;
+                FingerTip(g, fg, bx, by);
+                const float rTip = fg.width * g.r0 * s.mmpx * 1.1f;
+                if (static_cast<int>(g_cur->blobs.size()) < BlobCap()) g_cur->blobs.push_back({ bx, by, rTip * rTip, 1.0f, 0.0f, U(0.0f, 6.283f), hold + 0.5 });
+            }
+            g_globs.erase(g_globs.begin() + static_cast<std::ptrdiff_t>(i));
         }
     }
 
@@ -505,10 +756,7 @@ namespace
         const float pour = g_request.pour.exchange(0.0f);
         if (splash > 0.0f) {
             g_s.splashStr = splash;
-            ChooseImpacts();  // every splash hits somewhere new
-            g_s.splashLeft += g_cfg.splashBlobs * splash;
-            g_s.splashRate = std::max(g_s.splashRate, g_cfg.splashBlobs * splash / g_cfg.splashTime);
-            logger::info("Cream: splash {:.2f}", splash);
+            SpawnSplash(splash);
         }
         if (pour > 0.0f) {
             g_s.pourStr = pour;
@@ -535,6 +783,7 @@ namespace
 
         bool Start(DripSim::IHost* host, std::int32_t variant) override
         {
+            g_host = host;
             LoadSettings();
             g_surfs.clear();
             float total = 0.0f;
@@ -569,6 +818,7 @@ namespace
                 names += std::format("{}{} {:.0f}%", names.empty() ? "" : ", ", surf.name, surf.weight * 100.0f);
             }
             g_s = State{};
+            g_globs.clear();
             g_rng.seed(std::random_device{}());
             g_s.warmth = g_cfg.warmth * U(0.0f, 1.0f) * U(0.0f, 1.0f);  // mostly near white, now and then noticeably yellowish
             ApplyLook();
@@ -592,14 +842,9 @@ namespace
                 ApplyLook();
             }
 
-            if (g_s.splashLeft > 0.0f) {
-                g_s.spawnAcc += std::min(g_s.splashRate * dt, g_s.splashLeft);
-                const int n = static_cast<int>(g_s.spawnAcc);
-                g_s.spawnAcc -= static_cast<float>(n);
-                g_s.splashLeft -= static_cast<float>(n);
-                for (int i = 0; i < n; ++i) SplashHit();
+            if (!g_globs.empty()) {
+                UpdateGlobs(dt);
                 g_s.since = 0;
-                if (g_s.splashLeft < 1.0f) g_s.splashLeft = 0.0f, g_s.splashRate = 0.0f;
             }
             if (g_s.pourLeft > 0.0f) {
                 g_s.pourLeft -= dt;
@@ -653,8 +898,9 @@ namespace
             logger::info("Cream: stopped after {:.0f} s", g_s.t);
             g_s = State{};
             g_surfs.clear();
-            g_impacts.clear();
+            g_globs.clear();
             g_cur = nullptr;
+            g_host = nullptr;
             g_request.splash.store(0.0f);
             g_request.pour.store(0.0f);
         }
