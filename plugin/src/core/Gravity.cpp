@@ -91,6 +91,11 @@ namespace
                     const double phase = (static_cast<double>(x / scale) * l.dx + static_cast<double>(y / scale) * l.dy) / kPeriod - time * kSpeed;
                     if (phase - std::floor(phase) >= 0.5) c = (c >> 1) & 0x007F7F7Fu;
                 }
+                // height lines of the standing pose (every 5 units dark, every 25 white): on the body they must be level rings. If they are not, the
+                // positions and UVs of the vertices are paired wrongly in the capture (the colours and stripes then point the wrong way too).
+                const float z = field.CenterZ(id) - field.ZMin();
+                if (std::fmod(z, 25.0f) < 0.9f) c = 0x00FFFFFFu;
+                else if (std::fmod(z, 5.0f) < 0.6f) c = 0x00101010u;
                 image[static_cast<std::size_t>(y) * n + static_cast<std::size_t>(x)] = 0xE6000000u | c;
             }
         }

@@ -107,6 +107,7 @@ namespace DS::Field
         float m_zMax = 1.0f;
         bool m_ready = false;
         bool m_loggedBones = false;
+        bool m_checkedUphill = false;  // diagnostics: once per build, triangles whose downhill points up
         bool EnsureWorld() const;
         mutable std::vector<float> m_world;  // 3 per vertex, world space
         mutable bool m_worldValid = false;

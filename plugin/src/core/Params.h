@@ -13,6 +13,9 @@ namespace DS::Params
         bool donor = false;  // draw into another overlay's texture object (old method: that overlay's own slot then shows our film too); off = our own placeholder texture file
         bool normalMaps = false;  // give the fluid a normal map (needs a model-space overlay); off until it is verified in game
         float rainDensityRef = 1500.0f;  // precipitation particle density that counts as the heaviest rain (calibrate with the log line Weather: ...)
+        // diagnostics: force how a surface's vertices are read in the capture (ReadingBody / ReadingHands / ReadingFeet / ReadingFace = data * 10 + tri,
+        // e.g. 31 = data3/tri1; -1 = choose by itself). Applies to the next capture (start an effect again).
+        int reading[4] = { -1, -1, -1, -1 };
     };
 
     const Values& Get();

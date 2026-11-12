@@ -265,6 +265,7 @@ namespace DS::Field
         m_attached = true;
         m_attachChecked = std::chrono::steady_clock::now();
         m_loggedBones = false;
+        m_checkedUphill = false;
         logger::info("Field {}: built {} triangles, z {:.1f}..{:.1f}", DS::Surface::Name(m_body->surface), m_tri.size(), m_zMin, m_zMax);
         return true;
     }
@@ -494,13 +495,24 @@ namespace DS::Field
         if (!m_loggedBones) {  // once per build: each bone's world-down in skin space (an upright body part should be near (0,0,-1))
             m_loggedBones = true;
             std::string text;
-            for (std::uint32_t i = 0; i < b.boneCount && i < 24; ++i) {
+            for (std::uint32_t i = 0; i < b.boneCount; ++i) {
                 auto* bone = skin->bones[i];
-                text += std::format("\n    [{}] {} ({:.2f}, {:.2f}, {:.2f})", i, bone && bone->name.c_str() ? bone->name.c_str() : "?", m_boneG[i * 3], m_boneG[i * 3 + 1], m_boneG[i * 3 + 2]);
+                const float* r = &b.skinToBoneRotation[static_cast<std::size_t>(i) * 9];
+                const float det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+                text += std::format("\n    [{}] {} ({:.2f}, {:.2f}, {:.2f}){}{}", i, bone ? (bone->name.c_str() && *bone->name.c_str() ? bone->name.c_str() : "(no name)") : "(no bone)",
+                    m_boneG[i * 3], m_boneG[i * 3 + 1], m_boneG[i * 3 + 2], std::fabs(det - 1.0f) > 0.05f ? std::format("  skinToBone det {:.2f}", det) : std::string(),
+                    m_boneG[i * 3 + 2] > -0.5f ? "  <- not downward" : "");
             }
             logger::info("Field {}: bone gravity (world down in skin space):{}", DS::Surface::Name(b.surface), text);
         }
 #endif
+        // diagnostics, once per build: with gravity pointing down, the downhill direction along the skin can never climb (gt.z <= 0). Triangles
+        // where it does have a bone whose gravity is wrong; the first one's vertices are logged with their bones and weights.
+        const bool checkUphill = !m_checkedUphill;
+        m_checkedUphill = true;
+        std::size_t uphill = 0;
+        std::size_t steepCount = 0;
+        std::int64_t firstUphill = -1;
         for (std::uint32_t t = 0; t < b.triangleCount; ++t) {
             auto& live = m_live[t];
             const auto& td = m_tri[t];
@@ -525,6 +537,13 @@ namespace DS::Field
             live.up = std::clamp(-dot, 0.0f, 1.0f);
             const float gt[3] = { g[0] - dot * td.n[0], g[1] - dot * td.n[1], g[2] - dot * td.n[2] };
             live.steep = std::sqrt(gt[0] * gt[0] + gt[1] * gt[1] + gt[2] * gt[2]);
+            if (checkUphill && live.steep >= kFlat) {
+                ++steepCount;
+                if (gt[2] > 0.1f * live.steep) {
+                    ++uphill;
+                    if (firstUphill < 0) firstUphill = t;
+                }
+            }
             const float dx = td.a[0] * gt[0] + td.a[1] * gt[1] + td.a[2] * gt[2];
             const float dy = td.a[3] * gt[0] + td.a[4] * gt[1] + td.a[5] * gt[2];
             const float dl = std::sqrt(dx * dx + dy * dy);
@@ -532,6 +551,26 @@ namespace DS::Field
             live.flat = 0;
             live.dx = dx / dl;
             live.dy = dy / dl;
+        }
+        if (checkUphill) {
+            std::string text;
+            if (firstUphill >= 0) {
+                const auto t = static_cast<std::size_t>(firstUphill);
+                text = std::format(" e.g. triangle {} (standing height {:.1f}):", t, m_tri[t].cz);
+                for (int k = 0; k < 3; ++k) {
+                    const std::size_t v = b.triangle[t * 3 + static_cast<std::size_t>(k)];
+                    text += std::format(" v{}[", v);
+                    for (int m = 0; m < 4; ++m) {
+                        const float w = b.weight[v * 4 + static_cast<std::size_t>(m)];
+                        if (w <= 0.0f) continue;
+                        const std::size_t bi = b.boneIndex[v * 4 + static_cast<std::size_t>(m)];
+                        text += std::format(" b{}:{:.2f}", bi, w);
+                    }
+                    text += " ]";
+                }
+            }
+            if (uphill > 0) logger::warn("Field {}: {} of {} steep triangles have a downhill direction that climbs{}", DS::Surface::Name(b.surface), uphill, steepCount, text);
+            else logger::info("Field {}: no steep triangle has a downhill direction that climbs ({} steep)", DS::Surface::Name(b.surface), steepCount);
         }
     }
 

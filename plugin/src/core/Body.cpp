@@ -3,6 +3,7 @@
 #include "Spike.h"
 
 #include "Body.h"
+#include "Params.h"
 
 // Capture of a skin surface (see Body.h). The vertex layout is decoded from the vertex description, so any skinned layout that carries position,
 // UV and skin weights works (body: stride 32, feet: stride 40 with normals and tangents); several skin partitions are merged through their vertex maps.
@@ -239,7 +240,10 @@ namespace
         //   data 0: vertex j of the partition buffer, CPU position of vertexMap[j]  (the reading the body always used)
         //   data 1: vertex vertexMap[j] of the (shared, global) buffer and its CPU position
         //   data 2: vertex j of the buffer and CPU position j (both by buffer index)
+        //   data 3: every vertex g of the shared, global buffer once, its bone palette from the partition whose triangles use it (always with tri 1)
         //   tri 0: index buffer entries are partition-local (mapped through vertexMap); tri 1: they are already global
+        // Seen on SE with a CBBE 3BA body: data0 (the old reading) pairs positions and UVs of different vertices (the standing-pose height lines came
+        // out scrambled and drops ran up the belly), data1/tri1 pairs them right but takes some vertices' bones from the wrong palette (speckled).
         struct Decoded
         {
             std::vector<float> position, uv, weight;
@@ -254,6 +258,48 @@ namespace
             d.boneIndex.assign(nv * 4, 0);
             d.written.assign(nv, 0);
             d.triangle.clear();
+            if (dataVariant == 3) {
+                // which partition draws each vertex: its triangles (global indices) say so; that partition's palette applies to the vertex's bones
+                std::vector<std::int32_t> owner(nv, -1);
+                for (std::uint32_t p = 0; p < partition->numPartitions; ++p) {
+                    const auto& part = partition->partitions[p];
+                    const auto* indices = reinterpret_cast<const std::uint16_t*>(parts[p].indices.data());
+                    const std::size_t count = std::min<std::size_t>(part.triangles, parts[p].indices.size() / 6) * 3;
+                    for (std::size_t i = 0; i < count; ++i) {
+                        const std::size_t g = indices[i];
+                        if (g < nv && owner[g] < 0) owner[g] = static_cast<std::int32_t>(p);
+                    }
+                }
+                for (std::size_t g = 0; g < nv; ++g) {
+                    if (owner[g] < 0) continue;
+                    const auto pi = static_cast<std::uint32_t>(owner[g]);
+                    const auto& part = partition->partitions[pi];
+                    const auto& l = layouts[pi];
+                    if ((g + 1) * l.stride > parts[pi].vertices.size() || (!l.staticPosition && g >= dynamicCount)) continue;
+                    const std::uint8_t* v = parts[pi].vertices.data() + g * l.stride;
+                    if (l.staticPosition) std::memcpy(&d.position[g * 3], v + l.posOff, 12);
+                    else std::memcpy(&d.position[g * 3], dynamicPositions + g * 4, 12);
+                    std::uint16_t uv[2];
+                    std::memcpy(uv, v + l.uvOff, 4);
+                    d.uv[g * 2] = HalfToFloat(uv[0]);
+                    d.uv[g * 2 + 1] = HalfToFloat(uv[1]);
+                    std::uint16_t w[4];
+                    std::memcpy(w, v + l.skinOff, 8);
+                    for (int k = 0; k < 4; ++k) {
+                        d.weight[g * 4 + static_cast<std::size_t>(k)] = HalfToFloat(w[k]);
+                        const std::uint8_t local = v[l.skinOff + 8 + static_cast<std::size_t>(k)];
+                        d.boneIndex[g * 4 + static_cast<std::size_t>(k)] = part.bones && local < part.numBones ? static_cast<std::uint8_t>(part.bones[local]) : local;
+                    }
+                    d.written[g] = 1;
+                }
+                for (std::uint32_t p = 0; p < partition->numPartitions; ++p) {
+                    const auto& part = partition->partitions[p];
+                    const auto* indices = reinterpret_cast<const std::uint16_t*>(parts[p].indices.data());
+                    const std::size_t count = std::min<std::size_t>(part.triangles, parts[p].indices.size() / 6) * 3;
+                    for (std::size_t i = 0; i < count; ++i) d.triangle.push_back(indices[i]);
+                }
+                return;
+            }
             for (std::uint32_t p = 0; p < partition->numPartitions; ++p) {
                 const auto& part = partition->partitions[p];
                 const auto& l = layouts[p];
@@ -296,6 +342,18 @@ namespace
             std::vector<float> edges;
             std::vector<float> ratios;
             std::size_t bad = 0;
+            std::size_t disjoint = 0;  // triangles whose vertices hardly share a bone (a wrong palette: neighbours hang on unrelated bones)
+            const auto shared = [&](std::size_t a, std::size_t b) {  // weight the two vertices give to the same bones
+                float sum = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    const float wa = d.weight[a * 4 + static_cast<std::size_t>(i)];
+                    if (wa <= 0.0f) continue;
+                    for (int j = 0; j < 4; ++j) {
+                        if (d.boneIndex[b * 4 + static_cast<std::size_t>(j)] == d.boneIndex[a * 4 + static_cast<std::size_t>(i)]) sum += std::min(wa, d.weight[b * 4 + static_cast<std::size_t>(j)]);
+                    }
+                }
+                return sum;
+            };
             const std::size_t tris = d.triangle.size() / 3;
             for (std::size_t t = 0; t < tris; ++t) {
                 const std::size_t i[3] = { d.triangle[t * 3], d.triangle[t * 3 + 1], d.triangle[t * 3 + 2] };
@@ -323,6 +381,7 @@ namespace
                     continue;
                 }
                 ratios.push_back(std::log(area3 / areaUv));
+                if (std::min({ shared(i[0], i[1]), shared(i[1], i[2]), shared(i[2], i[0]) }) < 0.25f) ++disjoint;
             }
             if (edges.empty() || ratios.size() < 2) return 1e30;
             std::nth_element(edges.begin(), edges.begin() + static_cast<std::ptrdiff_t>(edges.size() / 2), edges.end());
@@ -334,24 +393,20 @@ namespace
             for (const float r : ratios) var += (r - mean) * (r - mean);
             const double sd = std::sqrt(var / static_cast<double>(ratios.size()));
             const double badShare = static_cast<double>(bad) / static_cast<double>(std::max<std::size_t>(tris, 1));
-            return median * (1.0 + sd) * (1.0 + 10.0 * badShare);
+            const double disjointShare = static_cast<double>(disjoint) / static_cast<double>(std::max<std::size_t>(tris, 1));
+            return median * (1.0 + sd) * (1.0 + 10.0 * badShare) * (1.0 + 5.0 * disjointShare);
         };
-        // The reading the body always used (data0/tri0) stays unless it is clearly broken: the score only sees the geometry, and a reading
-        // can pair positions and UVs right but give the vertices the wrong bones (seen on the body: data1/tri1 scored a little better, and its
-        // gravity came out speckled). A broken pairing scores many times worse (the face: 15.7 against 1.55), so 1.5x is a safe margin.
-        Decoded usual;
-        decode(0, 0, usual);
-        const double usualScore = score(usual);
+        // The best score wins. (An earlier version kept data0/tri0 unless it was clearly broken; for the body it was the wrong one.)
         Decoded best;
         double bestScore = 1e31;
         int bestData = 0;
         int bestTri = 0;
-        std::string scores = std::format(" data0/tri0={:.3g}", usualScore);
-        for (int dataVariant = 0; dataVariant < 3; ++dataVariant) {
-            if (dataVariant == 1 && !allGlobal) continue;  // needs the whole shape in every buffer
+        std::string scores;
+        for (int dataVariant = 0; dataVariant < 4; ++dataVariant) {
+            if ((dataVariant == 1 || dataVariant == 3) && !allGlobal) continue;  // needs the whole shape in every buffer
             if (dataVariant == 2 && !dynamicPositions) continue;  // only differs from 0 for CPU positions
             for (int triVariant = 0; triVariant < 2; ++triVariant) {
-                if (dataVariant == 0 && triVariant == 0) continue;
+                if (dataVariant == 3 && triVariant == 0) continue;  // data3 is global through and through
                 Decoded d;
                 decode(dataVariant, triVariant, d);
                 const double sc = score(d);
@@ -364,10 +419,14 @@ namespace
                 }
             }
         }
-        if (usualScore <= bestScore * 1.5) {
-            best = std::move(usual);
-            bestData = 0;
-            bestTri = 0;
+        const int forced = surface >= 0 && surface < 4 ? DS::Params::Get().reading[surface] : -1;
+        if (forced >= 0 && forced / 10 <= 3 && forced % 10 <= 1) {  // DripSim.ini Reading<Surface>=data*10+tri (diagnostics)
+            Decoded d;
+            decode(forced / 10, forced % 10, d);
+            best = std::move(d);
+            bestData = forced / 10;
+            bestTri = forced % 10;
+            scores += " (forced by DripSim.ini)";
         }
         logger::info("Capture {}: vertex readings{} -> data{}/tri{}", label, scores, bestData, bestTri);
         body->position = std::move(best.position);

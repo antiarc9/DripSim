@@ -26,6 +26,10 @@ namespace DS::Params
         values.perfLog = ini.Bool("PerfLog", false);
         values.refraction = ini.Float("Refraction", 0.0f);
         values.rainDensityRef = std::max(ini.Float("RainDensityRef", 1500.0f), 1.0f);
+        values.reading[0] = ini.Int("ReadingBody", -1);
+        values.reading[1] = ini.Int("ReadingHands", -1);
+        values.reading[2] = ini.Int("ReadingFeet", -1);
+        values.reading[3] = ini.Int("ReadingFace", -1);
         g_values = values;
         const auto summary = std::format("framework {}, rain density ref {:.0f}, normal maps {}, refraction {:.2f}", values.enabled ? "enabled" : "DISABLED", values.rainDensityRef, values.normalMaps ? "on" : "off", values.refraction);
         logger::info("Params: {}", summary);
