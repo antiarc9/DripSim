@@ -149,6 +149,9 @@ namespace
         float vx = 0, vy = 1;
         float age = 0, acc = 0;
         float ph = 0;
+        // diagnostics: where it started, and its standing-pose height there (a streak that runs downhill loses height)
+        float x0 = 0, y0 = 0, z0 = 0;
+        float dx0 = 0, dy0 = 0, steep0 = 0;
     };
 
     struct Surf
@@ -308,7 +311,26 @@ namespace
         r.ph = U(0.0f, 6.283f);
         r.vx = s.dx;
         r.vy = s.dy;
+        r.x0 = b.x;
+        r.y0 = b.y;
+        r.z0 = g_cur->field->CenterZ(g_cur->field->TriAt(static_cast<int>(b.x), static_cast<int>(b.y)));
+        r.dx0 = s.dx;
+        r.dy0 = s.dy;
+        r.steep0 = s.steep;
         g_cur->runners.push_back(r);
+    }
+
+    // Diagnostics: a streak that ended higher (standing pose) than it started has run uphill. One log line each, so a wrong direction of the
+    // gravity field at a spot can be found from the log (the atlas spot, the field's downhill direction there and how steep it is).
+    void CheckClimb(const Runner& r)
+    {
+        const auto tri = g_cur->field->TriAt(static_cast<int>(r.x), static_cast<int>(r.y));
+        if (tri < 0) return;
+        const float z1 = g_cur->field->CenterZ(tri);
+        if (z1 - r.z0 < 0.4f) return;  // 0.4 units ~ 5 mm
+        const auto s = At(r.x, r.y);
+        logger::warn("Cream: streak on {} ran UP {:.1f} units: atlas ({:.0f},{:.0f}) -> ({:.0f},{:.0f}) in {:.1f} s; field at start dir ({:.2f},{:.2f}) steep {:.2f}, at end dir ({:.2f},{:.2f}) steep {:.2f}",
+            g_cur->name, z1 - r.z0, r.x0, r.y0, r.x, r.y, r.age, r.dx0, r.dy0, r.steep0, s.dx, s.dy, s.steep);
     }
 
     // a blob lands: it joins a blob it touches (the two flow into one), otherwise it is a new blob
@@ -690,6 +712,7 @@ namespace
         const float vmm = 1.6f * rMm * s.steep * setting * (0.45f + 0.55f * pulse) / g_cfg.viscosity;  // a few mm per second at most
         const bool stop = !s.inner || s.steep < 0.05f || r.vol < 0.8f || (r.age > 1.5f && vmm < 0.35f) || r.age > 25.0f;
         if (stop) {
+            CheckClimb(r);
             if (s.inner && r.vol >= 0.3f && static_cast<int>(g_cur->blobs.size()) < BlobCap()) {
                 Blob b{ r.x, r.y, std::max(r.vol, 0.6f) * 1.2f, 1.2f, std::atan2(r.vy, r.vx), std::atan2(r.vy, r.vx) };
                 g_cur->blobs.push_back(b);
