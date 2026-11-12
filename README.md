@@ -8,7 +8,7 @@ DripSim is an SKSE plugin. `DripSim.dll` is the framework (body capture, gravity
 A thick, opaque, slightly warm white fluid on the player's skin (body, hands, face): irregular blobs that flow together, creep slowly down the live pose leaving permanent streaks that end in hanging bulbs, with a soft satin gloss. It does not dry; it stays for `StayTime` seconds and then fades out.
 - Keys (`Data\SKSE\Plugins\DripSimCream.ini`): `KeySplash=Shift+C` (a spray over the front), `KeyPour=Shift+V` (poured from above), `KeyClean=Ctrl+Shift+C` (wipes it off)
 - Mod event: `akRef.SendModEvent("DripSim_Cream", "splash" | "pour" | "clean", strength 0..1)`
-- Look and flow: `Size`, `Viscosity`, `Opacity`, `Gloss`, `Sheen`, `Shininess`, `NormalStrength`, `Color=246,243,234`; amounts: `SplashBlobs`, `SplashTime`, `PourRate`, `PourTime`, `PourSpread`, `FaceShare`, `AimHeight`, `AimSpread`; `StayTime`, `FadeTime`, `MaxBlobs`, `MaxRunners`, `Face`, `Hands`, `Feet`
+- Look and flow: `Size`, `Viscosity`, `Opacity`, `Gloss`, `Sheen`, `Shininess`, `Shade`, `NormalStrength`, `Color=246,243,234`, `WarmColor=241,229,192`, `Warmth`, `Clearing`, `ClearTime`; amounts: `SplashBlobs`, `SplashTime`, `SplashCenters`, `SplashSpread`, `PourRate`, `PourTime`, `PourSpread`, `FaceShare`, `AimHeight`, `AimSpread`; `StayTime`, `FadeTime`, `MaxBlobs`, `MaxRunners`, `Face`, `Hands`, `Feet`, `DripBody`, `DripHands`, `DripFeet`, `DripFace` (off: the face's gravity field is not reliable)
 - Preview: `DripSimPreview --mode cream --variant 2 --at 1,4,10,20` (variant 1 = splash, 2 = pour)
 
 ## Requirements (to play)

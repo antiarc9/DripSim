@@ -19,29 +19,41 @@ namespace
 
     struct Settings
     {
-        float splashBlobs = 34.0f;   // blobs per splash at strength 1
-        float splashTime = 0.5f;     // seconds a splash lasts
+        float splashBlobs = 90.0f;   // blobs per splash at strength 1
+        float splashTime = 0.4f;     // seconds a splash lasts
+        int splashCenters = 2;       // impact spots per splash: the blobs land in a tight cluster around each
+        float splashSpread = 30.0f;  // mm: how far a splash spreads around its impact spot (most of it lands within this)
         float pourRate = 38.0f;      // blobs per second while pouring (strength 1)
         float pourTime = 3.0f;       // seconds a pour lasts (strength 1)
         float pourSpread = 7.0f;     // mm: how wide the stream lands around the pour point
         float faceShare = 0.35f;     // share of a splash that lands on the face (when the face surface is there)
         float aimHeight = 0.72f;     // splash on the body: where it is aimed, 0 feet .. 1 top of the head
-        float aimSpread = 0.22f;     // how far around that height it spreads
+        float aimSpread = 0.1f;      // how far around that height the impact spots may be
         float size = 1.0f;           // multiplies blob sizes
         float viscosity = 1.0f;      // higher = holds on steeper skin, creeps slower and not as far
         float opacity = 1.0f;        // multiplies the body opacity of the thick cream
         float gloss = 1.0f;          // highlights on the blobs
-        float normals = 2.2f;        // the film's normal map strength (0 = none; needs NormalMaps=1 in DripSim.ini): lumpy, glossy relief
+        float normals = 1.3f;        // the film's normal map strength (0 = none; needs NormalMaps=1 in DripSim.ini): relief the game's lights see
         float sheen = 1.4f;          // the skin's specular strength under the cream; 0 = off
         float shininess = 65.0f;     // gloss exponent there: lower than water (130), a broader, softer satin highlight
+        float shade = 0.15f;         // how much darker the side of a blob away from the light is (0 = flat white)
         float stayTime = 600.0f;     // seconds the cream stays after the last splash / pour (0 = until cleaned)
         float fadeTime = 20.0f;      // seconds it takes to fade out after that
-        float color[3] = { 246.0f, 243.0f, 234.0f };  // the thick cream (a slightly warm white)
+        float color[3] = { 246.0f, 243.0f, 234.0f };      // the thick cream (a slightly warm white)
+        float warmColor[3] = { 241.0f, 229.0f, 192.0f };  // the yellowish tint it can take on
+        float warmth = 0.35f;        // up to this much of the tint, picked at random each time (some batches are whiter, some a little yellow)
+        float clearing = 0.45f;      // as it sits on the skin it thins out: paler and more see-through, by up to this much ...
+        float clearTime = 240.0f;    // ... fully reached after this many seconds
         int maxBlobs = 900;
         int maxRunners = 50;
         bool face = true;
         bool hands = true;
         bool feet = false;
+        // may it run on this surface? The face's gravity field is not reliable (drops were seen running up the face in the rain mode), so there it stays put
+        bool dripBody = true;
+        bool dripHands = true;
+        bool dripFeet = true;
+        bool dripFace = false;
     };
     Settings g_cfg;
 
@@ -65,6 +77,8 @@ namespace
         v.faceShare = std::clamp(ini.Float("FaceShare", v.faceShare), 0.0f, 1.0f);
         v.aimHeight = ini.Float("AimHeight", v.aimHeight);
         v.aimSpread = std::max(ini.Float("AimSpread", v.aimSpread), 0.02f);
+        v.splashCenters = std::clamp(ini.Int("SplashCenters", v.splashCenters), 1, 8);
+        v.splashSpread = std::max(ini.Float("SplashSpread", v.splashSpread), 2.0f);
         v.size = ini.Float("Size", v.size);
         v.viscosity = std::max(ini.Float("Viscosity", v.viscosity), 0.1f);
         v.opacity = ini.Float("Opacity", v.opacity);
@@ -72,14 +86,23 @@ namespace
         v.normals = ini.Float("NormalStrength", v.normals);
         v.sheen = ini.Float("Sheen", v.sheen);
         v.shininess = ini.Float("Shininess", v.shininess);
+        v.shade = std::clamp(ini.Float("Shade", v.shade), 0.0f, 1.0f);
         v.stayTime = ini.Float("StayTime", v.stayTime);
         v.fadeTime = std::max(ini.Float("FadeTime", v.fadeTime), 0.5f);
         ReadColor(ini, "Color", v.color);
+        ReadColor(ini, "WarmColor", v.warmColor);
+        v.warmth = std::clamp(ini.Float("Warmth", v.warmth), 0.0f, 1.0f);
+        v.clearing = std::clamp(ini.Float("Clearing", v.clearing), 0.0f, 1.0f);
+        v.clearTime = std::max(ini.Float("ClearTime", v.clearTime), 1.0f);
         v.maxBlobs = ini.Int("MaxBlobs", v.maxBlobs);
         v.maxRunners = ini.Int("MaxRunners", v.maxRunners);
         v.face = ini.Bool("Face", v.face);
         v.hands = ini.Bool("Hands", v.hands);
         v.feet = ini.Bool("Feet", v.feet);
+        v.dripBody = ini.Bool("DripBody", v.dripBody);
+        v.dripHands = ini.Bool("DripHands", v.dripHands);
+        v.dripFeet = ini.Bool("DripFeet", v.dripFeet);
+        v.dripFace = ini.Bool("DripFace", v.dripFace);
         g_cfg = v;
         logger::info("Cream: settings: splash {:.0f} blobs pour {:.0f}/s for {:.1f}s size {:.2f} viscosity {:.2f} opacity {:.2f} gloss {:.2f} stay {:.0f}s", v.splashBlobs, v.pourRate, v.pourTime,
             v.size, v.viscosity, v.opacity, v.gloss, v.stayTime);
@@ -109,6 +132,7 @@ namespace
         DripSim::ILayer* layer = nullptr;
         const DripSim::IField* field = nullptr;
         float weight = 1.0f;     // share of a splash
+        bool drip = true;        // blobs here may run (DripBody / DripHands / DripFeet / DripFace)
         float pourX = -1.0f;     // where the pour lands on this surface (-1 = it gets none)
         float pourY = -1.0f;
         std::vector<Blob> blobs;
@@ -130,8 +154,19 @@ namespace
         float pourAcc = 0;
         float checkAcc = 0;
         float alpha = 1;
+        float warmth = 0;       // this run's tint (0 white .. 1 WarmColor)
+        double firstAt = -1;    // when the first cream landed (the thinning out counts from here)
+        float lookAcc = 0;
         std::uint64_t frames = 0;
     };
+
+    // where the blobs of the current splash land: a few tight impact spots
+    struct Impact
+    {
+        std::size_t surf;
+        float x, y;
+    };
+    std::vector<Impact> g_impacts;
     State g_s;
     std::mt19937 g_rng{ 11u };
 
@@ -159,26 +194,37 @@ namespace
     void ApplyLook()
     {
         DripSim::Look look{};
-        const float film[3] = { 228.0f, 226.0f, 220.0f };
+        // the tint: white .. a light yellow, a random amount per run. The longer it sits, the more it thins out: the tint fades,
+        // the opaque body gets more see-through and less of it counts as thick (the edges and thin parts clear first)
+        const float aged = g_s.firstAt < 0.0 ? 0.0f : std::min(static_cast<float>(g_s.t - g_s.firstAt) / g_cfg.clearTime, 1.0f);
+        const float clear = g_cfg.clearing * aged * (2.0f - aged);  // eases out: most of it in the first half
+        const float w = std::clamp(g_s.warmth * (1.0f - 0.6f * clear), 0.0f, 1.0f);
+        float core[3];
+        float film[3];
+        const float thin[3] = { 230.0f, 226.0f, 214.0f };  // thin cream looks a touch yellower and greyer than thick: the skin shows through it
+        for (int i = 0; i < 3; ++i) {
+            core[i] = g_cfg.color[i] + (g_cfg.warmColor[i] - g_cfg.color[i]) * w;
+            film[i] = thin[i] + (g_cfg.warmColor[i] * 0.95f - thin[i]) * std::min(w * 1.3f, 1.0f);
+        }
         const float rim[3] = { 255.0f, 255.0f, 252.0f };
         const float halo[3] = { 60.0f, 48.0f, 40.0f };
         for (int i = 0; i < 3; ++i) {
             look.bodyColor[i] = film[i];
-            look.coreColor[i] = g_cfg.color[i];
+            look.coreColor[i] = core[i];
             look.rimColor[i] = rim[i];
             look.haloColor[i] = halo[i];
         }
-        look.bodyAlpha = std::clamp(0.94f * g_cfg.opacity, 0.0f, 1.0f);
-        look.filmAlpha = std::clamp(0.34f * g_cfg.opacity, 0.0f, 1.0f);  // thin cream: milky, the skin shows through a little
-        look.creamStart = 0.16f;                                          // above this thickness the opaque body comes in (full ~0.5 above)
-        look.rimAlpha = 0.32f;
+        look.bodyAlpha = std::clamp(0.94f * g_cfg.opacity * (1.0f - 0.5f * clear), 0.0f, 1.0f);
+        look.filmAlpha = std::clamp(0.34f * g_cfg.opacity * (1.0f - 0.7f * clear), 0.0f, 1.0f);  // thin cream: milky, the skin shows through a little
+        look.creamStart = 0.16f + 0.3f * clear;  // above this thickness the opaque body comes in (full ~0.5 above)
+        look.rimAlpha = 0.26f;
         look.rimDirection = 0.45f;  // the lit side of a blob's edge shines more, but the rim goes most of the way round (a thick, rounded edge)
         look.haloAlpha = 0.03f;
         look.hole = 0.22f;
         look.glint = 0.9f * g_cfg.gloss;
-        look.mottle = 0.4f;     // a little unevenness in the white, so large areas do not look like paint
+        look.mottle = 0.55f;     // a little unevenness in the white, so large areas do not look like paint
         look.brightness = 1.0f;
-        look.shade = 0.5f;      // a soft dome: the side away from the light a touch greyer
+        look.shade = g_cfg.shade;  // a soft dome: the side away from the light only a touch greyer
         look.smooth = 0.55f;    // overlapping blobs flow together into one surface
         look.specPower = g_cfg.sheen > 0.0f ? g_cfg.shininess : 0.0f;
         look.specScale = 1.6f * g_cfg.sheen;
@@ -233,7 +279,7 @@ namespace
         for (std::size_t i = 0; i < g_cur->blobs.size(); ++i) {
             Blob& b = g_cur->blobs[i];
             if (std::hypot(b.x - x, b.y - y) * s.mmpx > (Radius(b.vol) + rMm) * 0.8f) continue;
-            if (Radius(b.vol + vol) > 7.0f) continue;  // a puddle that big on flat skin: the new cream lies beside it instead
+            if (Radius(b.vol + vol) > (g_cur->drip ? 7.0f : 4.5f)) continue;  // a puddle that big on flat skin: the new cream lies beside it instead
             const float total = b.vol + vol;
             b.x = (b.x * b.vol + x * vol) / total;
             b.y = (b.y * b.vol + y * vol) / total;
@@ -241,7 +287,7 @@ namespace
             b.stretch = 1.0f + (b.stretch - 1.0f) * 0.5f;
             DrawBlob(b);  // stamps are max-blended: the old shape stays under the grown one
             const auto here = At(b.x, b.y);
-            if (here.steep > 0.04f && here.inner && Radius(b.vol) >= CriticalRadiusMm(here.steep) && static_cast<int>(g_cur->runners.size()) < RunnerCap()) StartRunner(i);
+            if (g_cur->drip && here.steep > 0.04f && here.inner && Radius(b.vol) >= CriticalRadiusMm(here.steep) && static_cast<int>(g_cur->runners.size()) < RunnerCap()) StartRunner(i);
             return;
         }
         if (static_cast<int>(g_cur->blobs.size()) >= BlobCap()) return;
@@ -252,6 +298,7 @@ namespace
 
     void ReleaseHeavyBlobs()
     {
+        if (!g_cur->drip) return;
         for (std::size_t i = g_cur->blobs.size(); i-- > 0;) {
             if (static_cast<int>(g_cur->runners.size()) >= RunnerCap()) return;
             const Blob& b = g_cur->blobs[i];
@@ -273,49 +320,68 @@ namespace
         return &g_surfs.back();
     }
 
-    // one hit of a splash: a blob drawn out along the way it was flying, and a few small spatters thrown on ahead of it
+    // A new splash: where it hits. A few impact spots on skin that faces the front (on the body around AimHeight); the blobs then land
+    // in a tight cluster around them instead of all over the front.
+    void ChooseImpacts()
+    {
+        g_impacts.clear();
+        for (int c = 0; c < g_cfg.splashCenters; ++c) {
+            g_cur = PickSurface();
+            const auto* f = g_cur->field;
+            const int size = f->Size();
+            const bool body = g_cur->name == "body";
+            const float zSpan = std::max(f->ZMax() - f->ZMin(), 1e-3f);
+            for (int attempt = 0; attempt < 400; ++attempt) {
+                const float x = U(0.0f, static_cast<float>(size - 1));
+                const float y = U(0.0f, static_cast<float>(size - 1));
+                if (!f->Inner(static_cast<int>(x), static_cast<int>(y))) continue;
+                const auto tri = f->TriAt(static_cast<int>(x), static_cast<int>(y));
+                if (tri < 0) continue;
+                float accept = std::max(f->NormalY(tri), 0.0f);  // the front faces the spray
+                if (body) {
+                    const float zn = (f->CenterZ(tri) - f->ZMin()) / zSpan;
+                    const float d = (zn - g_cfg.aimHeight) / g_cfg.aimSpread;
+                    accept *= std::exp(-d * d);
+                }
+                if (Chance() > accept) continue;
+                g_impacts.push_back({ static_cast<std::size_t>(g_cur - g_surfs.data()), x, y });
+                break;
+            }
+        }
+    }
+
+    // One blob of a splash, around one impact spot: big and round in the middle, smaller and drawn out further away, flying outward
+    // (spatters point away from the impact, as in a real splash), with a few small droplets thrown on ahead of it.
     void SplashHit()
     {
-        g_cur = PickSurface();
+        if (g_impacts.empty()) return;
+        const Impact& hit = g_impacts[static_cast<std::size_t>(U(0.0f, static_cast<float>(g_impacts.size()) - 0.001f))];
+        g_cur = &g_surfs[hit.surf];
         const auto* f = g_cur->field;
-        const int size = f->Size();
-        const bool body = g_cur->name == "body";
-        const float zSpan = std::max(f->ZMax() - f->ZMin(), 1e-3f);
-        for (int attempt = 0; attempt < 40; ++attempt) {
-            const float x = U(0.0f, static_cast<float>(size - 1));
-            const float y = U(0.0f, static_cast<float>(size - 1));
-            if (!f->Inner(static_cast<int>(x), static_cast<int>(y))) continue;
-            const auto tri = f->TriAt(static_cast<int>(x), static_cast<int>(y));
-            if (tri < 0) continue;
-            float accept = std::max(f->NormalY(tri), 0.0f) + 0.03f;  // the front faces the spray
-            if (body) {
-                const float zn = (f->CenterZ(tri) - f->ZMin()) / zSpan;
-                const float d = (zn - g_cfg.aimHeight) / g_cfg.aimSpread;
-                accept *= std::exp(-d * d);
-            }
-            if (Chance() > accept) continue;
-            const auto s = At(x, y);
-            const float str = 0.6f + 0.4f * g_s.splashStr;
-            const float rMm = (Chance() < 0.25f ? U(2.4f, 4.0f) : U(0.9f, 2.4f)) * g_cfg.size * str;
-            // the flight direction along the skin: mostly sideways / up on the front, pulled a little downhill
-            const float ang = U(0.0f, 6.283f);
-            float dx = std::cos(ang) + 0.4f * s.dx;
-            float dy = std::sin(ang) + 0.4f * s.dy;
-            const float n = std::max(std::hypot(dx, dy), 1e-4f);
-            dx /= n;
-            dy /= n;
-            const float stretch = U(1.0f, 2.6f);
-            Land(x, y, rMm, stretch, std::atan2(dy, dx));
-            const int spatters = static_cast<int>(U(0.0f, 4.0f));
-            float reach = rMm * std::sqrt(stretch);
-            for (int i = 0; i < spatters; ++i) {
-                reach += U(1.5f, 4.0f) * rMm * 0.6f;
-                const float px = x + dx * reach / s.mmpx + Gauss() * 0.8f;
-                const float py = y + dy * reach / s.mmpx + Gauss() * 0.8f;
-                if (!f->Inner(static_cast<int>(px), static_cast<int>(py))) break;
-                Land(px, py, rMm * U(0.18f, 0.4f), U(1.0f, 1.8f), std::atan2(dy, dx));
-            }
-            return;
+        const auto c = At(hit.x, hit.y);
+        // distance from the impact: most within ~SplashSpread / 2, a tail out to SplashSpread
+        const float distMm = g_cfg.splashSpread * std::min(std::abs(Gauss()) * 0.45f, 1.2f);
+        const float dir = U(0.0f, 6.283f);
+        const float x = hit.x + std::cos(dir) * distMm / c.mmpx;
+        const float y = hit.y + std::sin(dir) * distMm / c.mmpx;
+        if (!f->Inner(static_cast<int>(x), static_cast<int>(y))) return;
+        const auto s = At(x, y);
+        const float closeness = std::exp(-2.0f * distMm / g_cfg.splashSpread);  // 1 at the impact .. small at the edge
+        const float str = 0.6f + 0.4f * g_s.splashStr;
+        const float rMm = (0.7f + 2.6f * closeness) * U(0.7f, 1.3f) * g_cfg.size * str;
+        const float dx = std::cos(dir);
+        const float dy = std::sin(dir);
+        const float stretch = 1.0f + (1.0f - closeness) * U(0.3f, 1.8f);
+        Land(x, y, rMm, stretch, dir);
+        if (closeness > 0.6f) return;  // the middle is one thick mass, no spatters
+        const int spatters = static_cast<int>(U(0.0f, 3.0f));
+        float reach = rMm * std::sqrt(stretch);
+        for (int i = 0; i < spatters; ++i) {
+            reach += U(1.2f, 3.0f) * rMm * 0.6f;
+            const float px = x + dx * reach / s.mmpx + Gauss() * 0.6f;
+            const float py = y + dy * reach / s.mmpx + Gauss() * 0.6f;
+            if (!f->Inner(static_cast<int>(px), static_cast<int>(py))) break;
+            Land(px, py, rMm * U(0.2f, 0.4f), U(1.0f, 1.6f), dir);
         }
     }
 
@@ -364,10 +430,10 @@ namespace
         const auto s = At(r.x, r.y);
         const float rMm = Radius(r.vol);
         // it slows as it sets; when it hardly moves any more, or the skin flattens out or ends, the rest of it stays as a hanging bulb
-        const float setting = 1.0f / (1.0f + r.age / (10.0f / g_cfg.viscosity));
+        const float setting = 1.0f / (1.0f + r.age / (6.0f / g_cfg.viscosity));
         const float pulse = (std::sin(r.age * 2.1f + r.ph) + 1.0f) * 0.5f;  // a slow, uneven creep
-        const float vmm = 6.0f * rMm * s.steep * setting * (0.45f + 0.55f * pulse) / g_cfg.viscosity;
-        const bool stop = !s.inner || s.steep < 0.05f || r.vol < 0.8f || (r.age > 1.0f && vmm < 0.25f);
+        const float vmm = 1.6f * rMm * s.steep * setting * (0.45f + 0.55f * pulse) / g_cfg.viscosity;  // a few mm per second at most
+        const bool stop = !s.inner || s.steep < 0.05f || r.vol < 0.8f || (r.age > 1.5f && vmm < 0.12f);
         if (stop) {
             if (s.inner && r.vol >= 0.3f && static_cast<int>(g_cur->blobs.size()) < BlobCap()) {
                 Blob b{ r.x, r.y, std::max(r.vol, 0.6f) * 1.2f, 1.2f, std::atan2(r.vy, r.vx), std::atan2(r.vy, r.vx) };
@@ -439,6 +505,7 @@ namespace
         const float pour = g_request.pour.exchange(0.0f);
         if (splash > 0.0f) {
             g_s.splashStr = splash;
+            ChooseImpacts();  // every splash hits somewhere new
             g_s.splashLeft += g_cfg.splashBlobs * splash;
             g_s.splashRate = std::max(g_s.splashRate, g_cfg.splashBlobs * splash / g_cfg.splashTime);
             logger::info("Cream: splash {:.2f}", splash);
@@ -453,6 +520,7 @@ namespace
         }
         if (splash > 0.0f || pour > 0.0f) {
             g_s.since = 0;
+            if (g_s.firstAt < 0.0) g_s.firstAt = g_s.t;
             if (g_s.alpha < 1.0f) {
                 g_s.alpha = 1.0f;
                 for (auto& surf : g_surfs) surf.layer->SetAlpha(1.0f);
@@ -477,6 +545,7 @@ namespace
                 surf.layer = host->SurfaceLayer(i);
                 surf.field = host->SurfaceField(i);
                 if (!surf.layer || !surf.field) continue;
+                surf.drip = surf.name == "body" ? g_cfg.dripBody : surf.name == "hands" ? g_cfg.dripHands : surf.name == "feet" ? g_cfg.dripFeet : g_cfg.dripFace;
                 double area = 0.0;
                 for (int y = 0; y < surf.field->Size(); y += 4) {
                     for (int x = 0; x < surf.field->Size(); x += 4) {
@@ -501,6 +570,7 @@ namespace
             }
             g_s = State{};
             g_rng.seed(std::random_device{}());
+            g_s.warmth = g_cfg.warmth * U(0.0f, 1.0f) * U(0.0f, 1.0f);  // mostly near white, now and then noticeably yellowish
             ApplyLook();
             // started by a key or event: its request is waiting; started some other way (console, preview): do what the variant says
             if (g_request.splash.load() <= 0.0f && g_request.pour.load() <= 0.0f) CreamRequest(variant == 2 ? CreamKind::Pour : CreamKind::Splash, 1.0f);
@@ -516,6 +586,11 @@ namespace
             g_s.since += dt;
             ++g_s.frames;
             TakeRequests();
+            g_s.lookAcc += dt;
+            if (g_s.lookAcc >= 1.0f) {  // the slow thinning out
+                g_s.lookAcc = 0.0f;
+                ApplyLook();
+            }
 
             if (g_s.splashLeft > 0.0f) {
                 g_s.spawnAcc += std::min(g_s.splashRate * dt, g_s.splashLeft);
@@ -535,7 +610,7 @@ namespace
                 for (auto& surf : g_surfs) {
                     if (surf.pourX < 0.0f) continue;
                     const bool hasFace = std::ranges::any_of(g_surfs, [](const Surf& s) { return s.name == "face" && s.pourX >= 0.0f; });
-                    const float share = !hasFace ? 1.0f : surf.name == "face" ? 0.45f : 0.55f;
+                    const float share = !hasFace ? 1.0f : surf.name == "face" ? 0.3f : 0.7f;  // little on the face: it does not run there
                     PourOn(surf, static_cast<int>(std::round(static_cast<float>(n) * share + Chance() - 0.5f)));
                 }
                 g_s.since = 0;
@@ -578,6 +653,7 @@ namespace
             logger::info("Cream: stopped after {:.0f} s", g_s.t);
             g_s = State{};
             g_surfs.clear();
+            g_impacts.clear();
             g_cur = nullptr;
             g_request.splash.store(0.0f);
             g_request.pour.store(0.0f);
