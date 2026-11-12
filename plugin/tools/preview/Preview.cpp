@@ -9,7 +9,7 @@
 //
 //   DripSimPreview --pack body_pack.bin --mode rain --out out --at 0.5,1.5,4,10 --view belly
 //
-// Options: --pack file   body data (python export_pack.py)        --mode rain          --out dir (pictures go here, and Data\SKSE\Plugins\*.ini)
+// Options: --pack file   body data (python export_pack.py)        --mode rain|cream    --out dir (pictures go here, and Data\SKSE\Plugins\*.ini)
 //          --at t,t,..   seconds at which a picture is taken      --seconds N          run at least this long (default: last --at)
 //          --view full|torso|belly|chest|thighs|z0,z1   which part of the body height (0..1) to show      --yaw deg   turn the body (0 = front)
 //          --size WxH    picture size (default 900x900)           --ini K=V,K=V        settings of the mode (its INI keys)
@@ -18,6 +18,7 @@
 //          --also-rain   runs the rain mode in a second layer on top of the main mode (stacking test)
 #include "Field.h"
 #include "Film.h"
+#include "CreamMode.h"
 #include "RainMode.h"
 
 namespace
@@ -346,15 +347,15 @@ namespace
         return image;
     }
 
-    // The modes by name (nullptr = unknown; a public build only knows "rain"), and the INI each mode reads.
+    // The modes by name (nullptr = unknown), and the INI each mode reads.
     DripSim::IMode* ModeByName(const std::string& name)
     {
-        return name == "rain" ? RainModeInstance() : nullptr;
+        return name == "rain" ? RainModeInstance() : name == "cream" ? CreamModeInstance() : nullptr;
     }
 
     std::string IniName(const std::string& mode)
     {
-        return "DripSimRain";
+        return mode == "cream" ? "DripSimCream" : "DripSimRain";
     }
 
     // ------------------------------------------------------------------ command line

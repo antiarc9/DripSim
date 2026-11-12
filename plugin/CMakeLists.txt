@@ -10,8 +10,8 @@ if(NOT COMMAND add_commonlibsse_plugin)
     include(lib/CommonLibSSE-NG/cmake/CommonLibSSE.cmake)
 endif()
 
-# Two plugins: the framework (DripSim.dll: hooks, body, gravity field, film layers, API) and the rain mode, built against api/DripSimAPI.h
-# (DripSimRain.dll). A mode never touches the engine hooks; it only talks to the framework through the API.
+# Three plugins: the framework (DripSim.dll: hooks, body, gravity field, film layers, API) and two modes built against api/DripSimAPI.h:
+# rain (DripSimRain.dll) and cream (DripSimCream.dll). A mode never touches the engine hooks; it only talks to the framework through the API.
 add_commonlibsse_plugin(DripSim
     NAME DripSim
     AUTHOR "DripSim"
@@ -37,9 +37,16 @@ add_commonlibsse_plugin(DripSimRain
         src/rain/RainMain.cpp
         src/rain/RainMode.cpp
 )
+add_commonlibsse_plugin(DripSimCream
+    NAME DripSimCream
+    AUTHOR "DripSim"
+    VERSION ${PROJECT_VERSION}
+    SOURCES
+        src/cream/CreamMain.cpp
+        src/cream/CreamMode.cpp
+)
 
-
-set(DRIPSIM_TARGETS DripSim DripSimRain)
+set(DRIPSIM_TARGETS DripSim DripSimRain DripSimCream)
 foreach(target ${DRIPSIM_TARGETS})
     target_compile_features(${target} PRIVATE cxx_std_23)
     target_include_directories(${target} PRIVATE src/core ${CMAKE_CURRENT_SOURCE_DIR}/../api)
@@ -47,6 +54,7 @@ foreach(target ${DRIPSIM_TARGETS})
 endforeach()
 target_compile_definitions(DripSim PRIVATE DS_VERSION="${PROJECT_VERSION}")
 target_compile_definitions(DripSimRain PRIVATE DSR_VERSION="${PROJECT_VERSION}")
+target_compile_definitions(DripSimCream PRIVATE DSC_VERSION="${PROJECT_VERSION}")
 
 # DripSimPreview: runs a mode without the game and writes pictures (see tools/preview/Preview.cpp). Same film, field and mode sources as the plugins.
 add_executable(DripSimPreview
@@ -54,8 +62,9 @@ add_executable(DripSimPreview
     src/core/Field.cpp
     src/core/Film.cpp
     src/rain/RainMode.cpp
+    src/cream/CreamMode.cpp
 )
 target_compile_features(DripSimPreview PRIVATE cxx_std_23)
 target_compile_definitions(DripSimPreview PRIVATE DRIPSIM_PREVIEW)
-target_include_directories(DripSimPreview PRIVATE src/core src/rain ${CMAKE_CURRENT_SOURCE_DIR}/../api)
+target_include_directories(DripSimPreview PRIVATE src/core src/rain src/cream ${CMAKE_CURRENT_SOURCE_DIR}/../api)
 target_compile_options(DripSimPreview PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/tools/preview/PreviewShim.h)
