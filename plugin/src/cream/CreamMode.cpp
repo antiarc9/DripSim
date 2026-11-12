@@ -24,16 +24,18 @@ namespace
         int globsMin = 3;            // big globs per splash: a random number from GlobsMin to GlobsMax
         int globsMax = 5;
         float globSize = 7.0f;       // mm: radius of a glob as it lands (each one 75-125 % of this)
+        float faceSize = 1.3f;       // globs on the face are this much bigger (the face is small in the atlas, they looked like specks)
         float splashSpread = 40.0f;  // mm: how far apart the globs of one splash land (around one aim point)
         float spreadTime = 0.3f;     // seconds the impact takes to splay a glob out with its fingers (fast at first, slowing down)
-        float holdTime = 4.0f;       // seconds a splash then changes only a little before it starts to creep (each glob 75-125 % of this)
+        float holdTime = 1.5f;       // seconds a splash then changes only a little before it starts to creep (each glob 75-125 % of this)
         float holdSpread = 0.15f;    // share of the spreading that still happens slowly during the hold (0 = it stops when the impact is over)
         float holdSag = 0.3f;        // how far a glob sags downhill during the hold, in its radii (only where the skin may drip)
         float spread = 1.6f;         // its radius when splayed out, relative to when it landed (it gets flatter as it widens)
-        int fingersMin = 2;          // irregular fingers the impact pushes out of each glob
-        int fingersMax = 5;
-        float fingerLength = 1.2f;   // how far they reach, in glob radii (each 50-150 % of this)
-        int spatters = 2;            // small droplets thrown off around each glob (0 .. this many)
+        int fingersMin = 1;          // irregular fingers the impact pushes out of each glob
+        int fingersMax = 3;
+        float fingerLength = 0.9f;   // how far they reach, in glob radii (each 50-150 % of this)
+        float fingerWidth = 0.55f;   // how thick they are, in glob radii (each 80-125 % of this); thin ones look like torn needles
+        int spatters = 1;            // small droplets thrown off around each glob (0 .. this many)
         float pourRate = 38.0f;      // blobs per second while pouring (strength 1)
         float pourTime = 3.0f;       // seconds a pour lasts (strength 1)
         float pourSpread = 7.0f;     // mm: how wide the stream lands around the pour point
@@ -44,10 +46,10 @@ namespace
         float viscosity = 1.0f;      // higher = holds on steeper skin, creeps slower and not as far
         float opacity = 1.0f;        // multiplies the body opacity of the thick cream
         float gloss = 1.0f;          // highlights on the blobs
-        float normals = 1.3f;        // the film's normal map strength (0 = none; needs NormalMaps=1 in DripSim.ini): relief the game's lights see
+        float normals = 1.5f;        // the film's normal map strength (0 = none; needs NormalMaps=1 in DripSim.ini): relief the game's lights see
         float sheen = 1.4f;          // the skin's specular strength under the cream; 0 = off
         float shininess = 65.0f;     // gloss exponent there: lower than water (130), a broader, softer satin highlight
-        float shade = 0.15f;         // how much darker the side of a blob away from the light is (0 = flat white)
+        float shade = 0.2f;          // how much darker the side of a blob away from the light is (0 = flat white)
         float stayTime = 600.0f;     // seconds the cream stays after the last splash / pour (0 = until cleaned)
         float fadeTime = 20.0f;      // seconds it takes to fade out after that
         float color[3] = { 246.0f, 243.0f, 234.0f };      // the thick cream (a slightly warm white)
@@ -56,15 +58,15 @@ namespace
         float clearing = 0.45f;      // as it sits on the skin it thins out: paler and more see-through, by up to this much ...
         float clearTime = 240.0f;    // ... fully reached after this many seconds
         int maxBlobs = 900;
-        int maxRunners = 50;
+        int maxRunners = 80;
         bool face = true;
         bool hands = false;
         bool feet = false;
-        // may it run on this surface? The face's gravity field is not reliable (drops were seen running up the face in the rain mode), so there it stays put
+        // may it run on this surface? (the face's gravity field used to be noise: positions and UVs of the head were paired wrongly in the capture)
         bool dripBody = true;
         bool dripHands = true;
         bool dripFeet = true;
-        bool dripFace = false;
+        bool dripFace = true;
     };
     Settings g_cfg;
 
@@ -83,6 +85,8 @@ namespace
         v.globsMin = std::clamp(ini.Int("GlobsMin", v.globsMin), 1, 12);
         v.globsMax = std::clamp(ini.Int("GlobsMax", v.globsMax), v.globsMin, 12);
         v.globSize = std::max(ini.Float("GlobSize", v.globSize), 0.5f);
+        v.faceSize = std::max(ini.Float("FaceSize", v.faceSize), 0.1f);
+        v.fingerWidth = std::clamp(ini.Float("FingerWidth", v.fingerWidth), 0.1f, 1.5f);
         v.spreadTime = std::max(ini.Float("SpreadTime", v.spreadTime), 0.02f);
         v.holdTime = std::max(ini.Float("HoldTime", v.holdTime), 0.0f);
         v.holdSpread = std::clamp(ini.Float("HoldSpread", v.holdSpread), 0.0f, 0.9f);
@@ -257,11 +261,11 @@ namespace
         look.rimDirection = 0.45f;  // the lit side of a blob's edge shines more, but the rim goes most of the way round (a thick, rounded edge)
         look.haloAlpha = 0.03f;
         look.hole = 0.22f;
-        look.glint = 0.9f * g_cfg.gloss;
+        look.glint = 1.3f * g_cfg.gloss;  // wet highlights on the bulges, so a thick blob does not read as flat paint
         look.mottle = 0.55f;     // a little unevenness in the white, so large areas do not look like paint
         look.brightness = 1.0f;
         look.shade = g_cfg.shade;  // a soft dome: the side away from the light only a touch greyer
-        look.smooth = 0.55f;    // overlapping blobs flow together into one surface
+        look.smooth = 0.75f;    // overlapping stamps flow together into one surface (less: a fringe of fragments and glints)
         look.specPower = g_cfg.sheen > 0.0f ? g_cfg.shininess : 0.0f;
         look.specScale = 1.6f * g_cfg.sheen;
         look.normalStrength = g_cfg.normals;
@@ -472,7 +476,7 @@ namespace
                 break;
             }
             const auto s = At(x, y);
-            const float rMm = g_cfg.globSize * U(0.75f, 1.25f) * g_cfg.size * str;
+            const float rMm = g_cfg.globSize * U(0.75f, 1.25f) * g_cfg.size * str * (surf->name == "face" ? g_cfg.faceSize : 1.0f);
             Glob g;
             g.surf = static_cast<std::size_t>(surf - g_surfs.data());
             g.x = x;
@@ -495,7 +499,7 @@ namespace
             const float base = U(0.0f, 6.283f);
             for (int k = 0; k < fingers; ++k) {  // spread round the glob, not bunched up
                 const float ang = base + 6.283f * (static_cast<float>(k) + U(-0.3f, 0.3f)) / static_cast<float>(std::max(fingers, 1));
-                g.fingers.push_back({ ang, g_cfg.fingerLength * U(0.5f, 1.5f), U(0.3f, 0.5f), U(-0.5f, 0.5f), false });
+                g.fingers.push_back({ ang, g_cfg.fingerLength * U(0.5f, 1.5f), g_cfg.fingerWidth * U(0.8f, 1.25f), U(-0.4f, 0.4f), false });
             }
             // where the skin may drip, the finger nearest to downhill becomes the long one that turns into a streak
             if (surf->drip && s.steep > 0.1f && (s.dx != 0.0f || s.dy != 0.0f)) {
@@ -513,7 +517,7 @@ namespace
                 best->ang = down;
                 best->bend = 0.0f;
                 best->len = g_cfg.fingerLength * U(1.5f, 2.5f) * std::min(s.steep * 1.5f, 1.0f);
-                best->width = U(0.4f, 0.5f);
+                best->width = g_cfg.fingerWidth * U(0.85f, 1.1f);
                 best->down = true;
             }
             // a few small droplets thrown off as it hit
@@ -684,7 +688,7 @@ namespace
         const float setting = 1.0f / (1.0f + r.age / (6.0f / g_cfg.viscosity));
         const float pulse = (std::sin(r.age * 2.1f + r.ph) + 1.0f) * 0.5f;  // a slow, uneven creep
         const float vmm = 1.6f * rMm * s.steep * setting * (0.45f + 0.55f * pulse) / g_cfg.viscosity;  // a few mm per second at most
-        const bool stop = !s.inner || s.steep < 0.05f || r.vol < 0.8f || (r.age > 1.5f && vmm < 0.12f);
+        const bool stop = !s.inner || s.steep < 0.05f || r.vol < 0.8f || (r.age > 1.5f && vmm < 0.35f) || r.age > 25.0f;
         if (stop) {
             if (s.inner && r.vol >= 0.3f && static_cast<int>(g_cur->blobs.size()) < BlobCap()) {
                 Blob b{ r.x, r.y, std::max(r.vol, 0.6f) * 1.2f, 1.2f, std::atan2(r.vy, r.vx), std::atan2(r.vy, r.vx) };
