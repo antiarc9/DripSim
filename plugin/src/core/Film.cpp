@@ -341,10 +341,11 @@ namespace DS::Film
         thread_local std::vector<float> af;    // film alpha
         thread_local std::vector<float> rgbF;  // film colour (straight alpha)
         thread_local std::vector<float> blur;  // blurred film alpha, for the halo
+        thread_local std::vector<float> thick; // cream: how much opaque body is here (the halo of cream is a contact shadow of its thick parts only)
         thread_local std::vector<float> slx;   // thickness slopes (for the normal map)
         thread_local std::vector<float> sly;
         const auto size = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-        for (auto* v : { &hw, &tmp, &af, &blur }) v->assign(size, 0.0f);
+        for (auto* v : { &hw, &tmp, &af, &blur, &thick }) v->assign(size, 0.0f);
         rgbF.assign(size * 3, 0.0f);
         const bool wantNormals = !m_slope.empty() && WantsNormals();
         if (wantNormals) {
@@ -540,7 +541,24 @@ namespace DS::Film
                 float rgb[3];
                 for (int c = 0; c < 3; ++c) {
                     const float base = hasCore ? look.bodyColor[c] + (look.coreColor[c] - look.bodyColor[c]) * creamMix : look.bodyColor[c];  // the warm glow of the thick cream
-                    rgb[c] = (base * mod * (1.0f - 0.6f * look.shade * away) * aBody * (1.0f - rim) + look.rimColor[c] * rim) * inv;
+                    const float awayDark = look.creamStart > 0.0f ? 0.0f : 0.6f * look.shade * away;  // (cream: the dome shading below instead)
+                    rgb[c] = (base * mod * (1.0f - awayDark) * aBody * (1.0f - rim) + look.rimColor[c] * rim) * inv;
+                }
+                if (look.creamStart > 0.0f) {
+                    // cream as a soft dome: the normal follows the thickness slope. The side towards the light a little brighter, the far side and the
+                    // steep edges where the dome falls away a little darker, and a small soft highlight near the top facing the light. Only the
+                    // opaque body is shaded like this (a thin film stays flat); Shade sets how strong it is.
+                    const float nx = -gxv * 1.4f;
+                    const float ny = -gyv * 1.4f;
+                    const float nl = 1.0f / std::sqrt(nx * nx + ny * ny + 1.0f);
+                    const float tilt = std::sqrt(nx * nx + ny * ny) * nl;
+                    const float ndl = (nx * kLightX + ny * kLightY + kLightZ) * nl;
+                    const float ndh = (nx * kHalfX + ny * kHalfY + kHalfZ) * nl;
+                    const float strength = look.shade * creamBody;
+                    const float light = std::clamp(1.0f + 1.6f * strength * (ndl - kLightZ), 0.6f, 1.12f) * (1.0f - 0.45f * strength * tilt * tilt);
+                    const float spot = std::clamp((std::pow(std::max(ndh, 0.0f), 40.0f) - 0.12f) * 1.4f, 0.0f, 1.0f) * std::min(look.glint * 0.45f, 0.8f) * creamBody;
+                    for (int c = 0; c < 3; ++c) rgb[c] = std::min(rgb[c] * light + (255.0f - std::min(rgb[c] * light, 255.0f)) * spot, 255.0f);
+                    thick[at(x, y)] = creamMix * aBody;
                 }
                 if (look.creamStart <= 0.0f && look.glint > 0.0f) {
                     // water: a dome whose surface normal follows the thickness slope. Clear in the middle, a soft shadow on the side facing away from the light,
@@ -581,9 +599,9 @@ namespace DS::Film
         }
 
         // halo: wet-darkened skin around the film = blurred coverage (two rounds of a 13-wide box blur ~ sigma 2.2), as sliding sums: the cost does not depend on the width
-        blur = af;
+        blur = look.creamStart > 0.0f ? thick : af;  // cream: the shadow of its thick parts on the skin; water: the wet skin around it
         float maxA = 0.0f;
-        for (const float a : af) maxA = std::max(maxA, a);
+        for (const float a : blur) maxA = std::max(maxA, a);
         for (int round = 0; round < (look.haloAlpha > 0.0f && maxA > 1e-4f ? 2 : 0); ++round) {
             for (int y = 0; y < h; ++y) {
                 const float* row = &blur[at(0, y)];
@@ -613,7 +631,9 @@ namespace DS::Film
                 const float aF = af[at(x, y)];
                 // the wet darkening runs up to the island edge and a little past it (the padded mask; the draw mask stops ~2 px short, which left a light line at every seam)
                 const bool inPad = padRaster.empty() ? keep[KeepIndex(gx, gy)] != 0 : padRaster[static_cast<std::size_t>(gy / kScale) * kSim + static_cast<std::size_t>(gx / kScale)] >= 0;
-                const float halo = inPad ? look.haloAlpha * std::clamp(blur[at(x, y)] * 1.8f, 0.0f, 1.0f) : 0.0f;
+                // cream: the contact shadow falls a little away from the light (sampled a few pixels towards it)
+                const float covered = look.creamStart > 0.0f ? blur[at(std::clamp(x - 2, 0, w - 1), std::clamp(y - 3, 0, h - 1))] : blur[at(x, y)];
+                const float halo = inPad ? look.haloAlpha * std::clamp(covered * 1.8f, 0.0f, 1.0f) : 0.0f;
                 const float aOut = aF + halo * (1.0f - aF);
                 float out[3] = { 0, 0, 0 };
                 if (aOut > 1e-4f) {

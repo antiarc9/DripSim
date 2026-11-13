@@ -9,8 +9,8 @@ A thick, opaque, slightly warm white fluid on the player's skin (face and body; 
 - Keys (`Data\SKSE\Plugins\DripSimCream.ini`): `KeySplash=Shift+C` (a shot at the face or the upper torso), `KeyPour=Shift+V` (poured from above), `KeyClean=Ctrl+Shift+C` (wipes it off)
 - Mod event: `akRef.SendModEvent("DripSim_Cream", "splash" | "pour" | "clean", strength 0..1)`
 - Shot: `StrandsMin`, `StrandsMax`, `StrandInterval`, `StrandLength` (cm), `StrandWidth` (mm), `Unevenness`, `BlobShare`, `ShotDistanceMin/Max` (cm), `ShotElevationMin/Max` (degrees), `ShotSide` (degrees), `Sweep`, `FaceShare`, `AimHeight`, `HoldTime`
-- Streaks: `TrailFade`, `TrailFloor`; flow: `Size`, `Viscosity`, `DripBody`, `DripHands`, `DripFeet`, `DripFace`, `MaxBlobs`, `MaxRunners`
-- Look: `Opacity`, `Gloss`, `Sheen`, `Shininess`, `Shade`, `NormalStrength`, `Color=246,243,234`, `WarmColor=241,229,192`, `Warmth`, `Clearing`, `ClearTime`; `StayTime`, `FadeTime`; pour: `PourRate`, `PourTime`, `PourSpread`; skin parts: `Face`, `Hands`, `Feet`
+- Streaks: `TrailFade`, `TrailFloor`; flow: `Size`, `Viscosity`, `FlowSpeed`, `SetTime`, `FlowTime`, `DripBody`, `DripHands`, `DripFeet`, `DripFace`, `MaxBlobs`, `MaxRunners`
+- Look: `Opacity`, `Gloss`, `Sheen`, `Shininess`, `Shade`, `ContactShadow`, `NormalStrength`, `Color=246,243,234`, `WarmColor=241,229,192`, `Warmth`, `Clearing`, `ClearTime`; `StayTime`, `FadeTime`; pour: `PourRate`, `PourTime`, `PourSpread`; skin parts: `Face`, `Hands`, `Feet`
 - Preview: `DripSimPreview --mode cream --variant 2 --at 1,4,10,20` (variant 1 = shot at the torso, 2 = pour; the preview has the body only)
 
 ## Requirements (to play)

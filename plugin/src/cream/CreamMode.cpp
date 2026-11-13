@@ -51,13 +51,17 @@ namespace
         float pourSpread = 7.0f;     // mm: how wide the stream lands around the pour point
         // flow and look
         float size = 1.0f;           // multiplies strand and blob sizes
-        float viscosity = 1.0f;      // higher = holds on steeper skin, creeps slower and not as far
+        float viscosity = 1.0f;      // how much it takes to set it moving: higher = only thicker blobs creep, and on steeper skin
+        float flowSpeed = 0.4f;      // how fast it creeps (1 = the old, quicker cream; ~0.3-0.5 = egg white: slow but it keeps going)
+        float setTime = 20.0f;       // seconds after which a creeping blob has slowed to half (higher = it keeps creeping longer)
+        float flowTime = 60.0f;      // seconds a blob creeps at most
         float opacity = 1.0f;        // multiplies the body opacity of the thick cream
         float gloss = 1.0f;          // highlights on the blobs
         float normals = 1.5f;        // the film's normal map strength (0 = none; needs NormalMaps=1 in DripSim.ini): relief the game's lights see
         float sheen = 1.4f;          // the skin's specular strength under the cream; 0 = off
         float shininess = 65.0f;     // gloss exponent there: lower than water (130), a broader, softer satin highlight
-        float shade = 0.2f;          // how much darker the side of a blob away from the light is (0 = flat white)
+        float shade = 0.2f;          // how strongly a thick blob is shaded as a dome (lit side, darker edges, a soft highlight; 0 = flat white)
+        float contactShadow = 0.3f;  // the soft shadow thick cream casts on the skin around it (0 = none)
         float stayTime = 600.0f;     // seconds the cream stays after the last splash / pour (0 = until cleaned)
         float fadeTime = 20.0f;      // seconds it takes to fade out after that
         float color[3] = { 246.0f, 243.0f, 234.0f };      // the thick cream (a slightly warm white)
@@ -112,12 +116,16 @@ namespace
         v.pourSpread = ini.Float("PourSpread", v.pourSpread);
         v.size = ini.Float("Size", v.size);
         v.viscosity = std::max(ini.Float("Viscosity", v.viscosity), 0.1f);
+        v.flowSpeed = std::max(ini.Float("FlowSpeed", v.flowSpeed), 0.01f);
+        v.setTime = std::max(ini.Float("SetTime", v.setTime), 0.5f);
+        v.flowTime = std::max(ini.Float("FlowTime", v.flowTime), 1.0f);
         v.opacity = ini.Float("Opacity", v.opacity);
         v.gloss = ini.Float("Gloss", v.gloss);
         v.normals = ini.Float("NormalStrength", v.normals);
         v.sheen = ini.Float("Sheen", v.sheen);
         v.shininess = ini.Float("Shininess", v.shininess);
         v.shade = std::clamp(ini.Float("Shade", v.shade), 0.0f, 1.0f);
+        v.contactShadow = std::clamp(ini.Float("ContactShadow", v.contactShadow), 0.0f, 1.0f);
         v.stayTime = ini.Float("StayTime", v.stayTime);
         v.fadeTime = std::max(ini.Float("FadeTime", v.fadeTime), 0.5f);
         ReadColor(ini, "Color", v.color);
@@ -135,8 +143,8 @@ namespace
         v.dripFeet = ini.Bool("DripFeet", v.dripFeet);
         v.dripFace = ini.Bool("DripFace", v.dripFace);
         g_cfg = v;
-        logger::info("Cream: settings: shot {}-{} strands of {:.1f} cm x {:.1f} mm from {:.0f}-{:.0f} cm, hold {:.1f}s, pour {:.0f}/s for {:.1f}s, size {:.2f} viscosity {:.2f} stay {:.0f}s",
-            v.strandsMin, v.strandsMax, v.strandLength, v.strandWidth, v.shotDistanceMin, v.shotDistanceMax, v.holdTime, v.pourRate, v.pourTime, v.size, v.viscosity, v.stayTime);
+        logger::info("Cream: settings: shot {}-{} strands of {:.1f} cm x {:.1f} mm from {:.0f}-{:.0f} cm, hold {:.1f}s, pour {:.0f}/s for {:.1f}s, size {:.2f} viscosity {:.2f} flow {:.2f} set {:.0f}s stay {:.0f}s",
+            v.strandsMin, v.strandsMax, v.strandLength, v.strandWidth, v.shotDistanceMin, v.shotDistanceMax, v.holdTime, v.pourRate, v.pourTime, v.size, v.viscosity, v.flowSpeed, v.setTime, v.stayTime);
     }
 
     struct Blob
@@ -247,7 +255,7 @@ namespace
     float CriticalRadiusMm(float steep) { return std::max(4.4f / (1.0f + 1.6f * std::max(steep, 0.05f)) * std::sqrt(g_cfg.viscosity), 1.2f); }
 
     // Opaque, slightly warm white: a milky translucent film where it is thin (smears, an old streak), a solid body where it is thick,
-    // soft satin highlights (a broad specular lobe, mild rim) and a lumpy normal map. No wet-darkened halo: cream does not soak the skin.
+    // soft satin highlights (a broad specular lobe, mild rim), dome shading and a lumpy normal map, and a soft contact shadow on the skin around it.
     void ApplyLook()
     {
         DripSim::Look look{};
@@ -264,7 +272,7 @@ namespace
             film[i] = thin[i] + (g_cfg.warmColor[i] * 0.95f - thin[i]) * std::min(w * 1.3f, 1.0f);
         }
         const float rim[3] = { 255.0f, 255.0f, 252.0f };
-        const float halo[3] = { 60.0f, 48.0f, 40.0f };
+        const float halo[3] = { 38.0f, 28.0f, 24.0f };  // the contact shadow: the skin darkened next to thick cream
         for (int i = 0; i < 3; ++i) {
             look.bodyColor[i] = film[i];
             look.coreColor[i] = core[i];
@@ -276,7 +284,7 @@ namespace
         look.creamStart = 0.16f + 0.3f * clear;  // above this thickness the opaque body comes in (full ~0.5 above)
         look.rimAlpha = 0.26f;
         look.rimDirection = 0.45f;  // the lit side of a blob's edge shines more, but the rim goes most of the way round (a thick, rounded edge)
-        look.haloAlpha = 0.03f;
+        look.haloAlpha = g_cfg.contactShadow;  // (for cream the framework draws the halo from the thick parts only, a little away from the light)
         look.hole = 0.22f;
         look.glint = 1.3f * g_cfg.gloss;  // wet highlights on the bulges, so a thick blob does not read as flat paint
         look.mottle = 0.55f;     // a little unevenness in the white, so large areas do not look like paint
@@ -729,10 +737,11 @@ namespace
         const auto s = At(r.x, r.y);
         const float rMm = Radius(r.vol);
         // it slows as it sets; when it hardly moves any more, or the skin flattens out or ends, the rest of it stays as a hanging bulb
-        const float setting = 1.0f / (1.0f + r.age / (6.0f / g_cfg.viscosity));
+        const float setting = 1.0f / (1.0f + r.age / g_cfg.setTime);
         const float pulse = (std::sin(r.age * 2.1f + r.ph) + 1.0f) * 0.5f;  // a slow, uneven creep
-        const float vmm = 1.6f * rMm * s.steep * setting * (0.45f + 0.55f * pulse) / g_cfg.viscosity;  // a few mm per second at most
-        const bool stop = !s.inner || s.steep < 0.05f || r.vol < 0.8f || (r.age > 1.5f && vmm < 0.35f) || r.age > 25.0f;
+        const float vmm = 1.6f * g_cfg.flowSpeed * rMm * s.steep * setting * (0.45f + 0.55f * pulse) / std::sqrt(g_cfg.viscosity);  // mm per second
+        // it stops when it has all but stopped (relative to how fast it was set to go), or after FlowTime
+        const bool stop = !s.inner || s.steep < 0.05f || r.vol < 0.8f || (r.age > 1.5f && vmm < 0.12f * g_cfg.flowSpeed) || r.age > g_cfg.flowTime;
         if (stop) {
             CheckClimb(r);
             if (s.inner && r.vol >= 0.3f && static_cast<int>(g_cur->blobs.size()) < BlobCap()) {
