@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(DripSim VERSION 1.2.0 LANGUAGES CXX)
+project(DripSim VERSION 1.2.1 LANGUAGES CXX)
 
 # CommonLibSSE-NG 7.2.0, the same release DazPoser builds against (copied into lib/).
 # The soak's draining sheet (rain/SoakFlow.*), free since 2026-11-13. OFF = DripSimSoak.dll without it (SoakFlow=1 in the INI then does nothing).

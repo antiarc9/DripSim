@@ -228,10 +228,15 @@ namespace
                 logger::warn("Capture {}: partition {} buffer too small or no vertex map; the surface is unavailable", label, p);
                 return;
             }
+            // SSE: the partitions of a shape usually share ONE vertex buffer that holds every vertex of the shape, and their GPU index buffers then hold
+            // global vertex numbers. Read such a buffer by the global number and take the indices as they are. (Reading it by the partition's local number
+            // scrambled every shape with more than one partition: the UBE body (2 partitions) had drips running up, 2026-11-13; the head has 3.)
+            const bool shared = parts[p].vertices.size() >= nv * stride;
+            if (DS::LogAllow("capture-shared")) logger::info("Capture {}: partition {} {} vertex buffer", label, p, shared ? "shares the shape's" : "has its own");
             for (std::uint32_t j = 0; j < part.vertices; ++j) {
                 const std::size_t gid = part.vertexMap ? part.vertexMap[j] : j;
                 if (gid >= nv) continue;
-                const std::uint8_t* v = parts[p].vertices.data() + static_cast<std::size_t>(j) * stride;
+                const std::uint8_t* v = parts[p].vertices.data() + (shared ? gid : static_cast<std::size_t>(j)) * stride;
                 if (staticPosition) std::memcpy(&body->position[gid * 3], v + posOff, 12);
                 else std::memcpy(&body->position[gid * 3], dynamicPositions + gid * 4, 12);
                 std::uint16_t uv[2];
@@ -251,7 +256,7 @@ namespace
             for (std::size_t t = 0; t < count; ++t) {
                 for (int k = 0; k < 3; ++k) {
                     const std::size_t local = indices[t * 3 + static_cast<std::size_t>(k)];
-                    body->triangle.push_back(static_cast<std::uint16_t>(part.vertexMap && local < part.vertices ? part.vertexMap[local] : local));
+                    body->triangle.push_back(static_cast<std::uint16_t>(!shared && part.vertexMap && local < part.vertices ? part.vertexMap[local] : local));
                 }
             }
         }
