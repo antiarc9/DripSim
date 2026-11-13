@@ -2,7 +2,7 @@
 
 Water on the skin of your character in Skyrim Special Edition. The drops merge into beads, run down along the real pose (the gravity direction comes from the live skeleton) and dry afterwards. Version 1.2.0.
 
-DripSim is an SKSE plugin. `DripSim.dll` is the framework (body capture, gravity field, the film that is drawn on the skin). `DripSimRain.dll` is the rain mode. Other effects can be added as small modes against `api/DripSimAPI.h`.
+DripSim is an SKSE plugin. `DripSim.dll` is the framework (body capture, gravity field, the film that is drawn on the skin). `DripSimRain.dll` is the rain mode, `DripSimSoak.dll` the water after a swim (the same water code, built twice). Other effects can be added as small modes against `api/DripSimAPI.h`.
 
 ## Requirements (to play)
 - Skyrim Special Edition 1.5.97 (the only version tested so far)

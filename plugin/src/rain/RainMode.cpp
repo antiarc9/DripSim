@@ -2,8 +2,17 @@
 // Copyright (C) 2026 AntiArc. This program is free software: see the LICENSE file (GNU GPL version 3 or later). It comes with NO WARRANTY.
 #include "RainMode.h"
 #include "LogLimit.h"
+#if DRIPSIM_SOAK_FLOW
+#include "SoakFlow.h"  // the new soak (supporters' build only: CMake DRIPSIM_SOAK_FLOW)
+#endif
 
 #include <atomic>
+
+// One source, two plugins (CMake DSW_KIND): 1 = DripSimRain.dll (the "rain" mode: weather only, no soak), 2 = DripSimSoak.dll (the "soak" mode: water after
+// a swim, no weather). 0 = both in one mode (the offline preview). Each plugin has its own INI, its own film layer and its own log.
+#ifndef DSW_KIND
+#define DSW_KIND 0
+#endif
 
 // Rain water on skin. The model is the classic "drops on a window": rain lands as small beads on surfaces that face the sky; beads that touch
 // merge; a bead that gets heavy for the slope slides down the live gravity direction, absorbing beads on its way and leaving a thin wet trail
@@ -16,6 +25,13 @@ namespace
 {
     constexpr float kPi = 3.14159265f;
     constexpr float kStep = 0.04f;  // runner time step (s)
+#if DSW_KIND == 2
+    constexpr const char* kModeName = "soak";
+    constexpr const char* kIniName = "DripSimSoak";
+#else
+    constexpr const char* kModeName = "rain";
+    constexpr const char* kIniName = "DripSimRain";
+#endif
 
     struct Settings
     {
@@ -56,6 +72,13 @@ namespace
         float soakNormals = 1.5f;
         float soakSheen = 2.0f;
         float soakShininess = 130.0f;
+#if DRIPSIM_SOAK_FLOW
+        // the soak as a draining sheet of water (SoakFlow.h)
+        bool soakFlow = true;
+        float soakSheet = 0.25f;     // thickness of the sheet the moment the water is left
+        int soakStreams = 10;        // stream sources near the top of the wet skin (neck, shoulders)
+        FlowParams flow{ 0.6f, 0.07f, 0.035f, 90.0f, 1.0f, 0.8f, 1.0f };
+#endif
         float sheenAlpha = 1.0f;  // the sheet as a wet sheen: most opacity, normal-map bend, colour (0 = the wet-skin halo colour .. 1 = the bright rim colour)
         float sheenBump = 2.0f;
         float sheenTint = 0.0f;
@@ -66,7 +89,7 @@ namespace
 
     void LoadSettings()
     {
-        const DripSim::Ini ini("DripSimRain");
+        const DripSim::Ini ini(kIniName);
         Settings v;
         v.autoStart = ini.Bool("Auto", true);
         v.rate = ini.Float("Rate", 110.0f);
@@ -87,7 +110,14 @@ namespace
         v.dripHands = ini.Bool("DripHands", true);
         v.dripFeet = ini.Bool("DripFeet", true);
         v.dripFace = ini.Bool("DripFace", false);
+#if DSW_KIND == 1
+        v.enableSoak = false;  // the rain plugin: the soak is DripSimSoak.dll
+#elif DSW_KIND == 2
+        v.enableSoak = ini.Bool("Enabled", true);  // the soak plugin: no weather rain, the soak is all it does
+        v.autoStart = false;
+#else
         v.enableSoak = ini.Bool("EnableSoak", false);
+#endif
         v.autoSoak = v.enableSoak && ini.Bool("AutoSoak", true);
         v.soakMinDepth = ini.Float("SoakMinDepth", 25.0f);
         v.soakMinTime = ini.Float("SoakMinTime", 1.0f);
@@ -103,6 +133,18 @@ namespace
         v.soakNormals = ini.Float("SoakNormalStrength", v.normals);
         v.soakSheen = ini.Float("SoakSheen", v.sheen);
         v.soakShininess = ini.Float("SoakShininess", v.shininess);
+#if DRIPSIM_SOAK_FLOW
+        v.soakFlow = ini.Bool("SoakFlow", true);
+        v.soakSheet = ini.Float("SoakSheet", 0.25f);
+        v.soakStreams = ini.Int("SoakStreams", 10);
+        v.flow.speed = ini.Float("SoakFlowSpeed", 0.6f);
+        v.flow.pin = ini.Float("SoakPin", 0.07f);
+        v.flow.film = ini.Float("SoakFilmLeft", 0.035f);
+        v.flow.dryTime = v.soakDry;
+        v.flow.streamRate = ini.Float("SoakStreamRate", 1.0f);
+        v.flow.gather = ini.Float("SoakGather", 0.8f);
+        v.flow.drawn = ini.Float("SoakDrawn", 1.0f);
+#endif
         v.sheenAlpha = ini.Float("SoakSheenAlpha", 1.0f);
         v.sheenBump = ini.Float("SoakSheenBump", 2.0f);
         v.sheenTint = ini.Float("SoakSheenTint", 0.0f);
@@ -146,6 +188,9 @@ namespace
         std::vector<Bead> beads;
         std::vector<Runner> runners;
         std::vector<Trail> trail;
+#if DRIPSIM_SOAK_FLOW
+        SoakFlow flow;  // the soak's draining sheet on this surface
+#endif
     };
     std::vector<Surf> g_surfs;
     Surf* g_cur = nullptr;  // the surface the helpers below work on (all on the main thread)
@@ -403,6 +448,15 @@ namespace
         g_s.film = std::max(g_s.film, strength);
         g_s.dryFor = 0;
         g_s.soakLook = true;
+#if DRIPSIM_SOAK_FLOW
+        if (g_cfg.soakFlow) {  // the skin that was in the water: a sheet that drains (not on a surface where water must not run: the face)
+            for (auto& surf : g_surfs) {
+                if (!surf.drip || !surf.field || surf.name != "body") continue;  // (the body only: on the hands, feet and face the flow cost a render job each and drew a cracked pattern on the face, game test 2026-11-11)
+                const int streams = static_cast<int>(std::lround(static_cast<float>(g_cfg.soakStreams) * std::clamp(surf.weight * 1.6f, 0.15f, 1.0f)));
+                surf.flow.Flood(*surf.field, g_bodyZMin + g_s.soakDepth, g_cfg.soakSheet * strength, streams, g_rng);
+            }
+        }
+#endif
         const int burst = static_cast<int>(static_cast<float>(g_cfg.soakBurst) * strength * (1.0f - 0.5f * before));
         SoakDrops(burst);
         logger::info("Rain: soak {:.2f} (water to {:.0f} units): {} drops at once", g_s.soak, depth, burst);
@@ -544,7 +598,7 @@ namespace
     class RainMode final : public DripSim::IMode
     {
     public:
-        const char* Name() const override { return "rain"; }
+        const char* Name() const override { return kModeName; }
 
         bool Start(DripSim::IHost* host, std::int32_t variant) override
         {
@@ -582,7 +636,7 @@ namespace
                 names += std::format("{}{} {:.0f}%{}", names.empty() ? "" : ", ", surf.name, surf.weight * 100.0f, surf.drip ? "" : " (no dripping)");
             }
             g_s = State{};
-            g_s.forced = variant == 1;
+            g_s.forced = DSW_KIND != 2 && variant == 1;  // (the soak plugin has no forced rain)
             g_rng.seed(std::random_device{}());
             g_bodyZMin = host->Field() ? host->Field()->ZMin() : 0.0f;
             ApplyLook(g_s.soakLook);
@@ -599,7 +653,9 @@ namespace
             ++g_s.frames;
             ApplyLook(g_s.soakLook);
             float rain = 0.0f;
-            if (g_s.forced) {
+            if (DSW_KIND == 2) {
+                rain = 0.0f;  // the soak plugin: no weather rain (DripSimRain.dll draws that on its own layer)
+            } else if (g_s.forced) {
                 rain = g_cfg.forced;
             } else {
                 const bool open = !g_cfg.needSky || (g_world->SkyExposed() && !g_world->IsInterior());
@@ -647,10 +703,25 @@ namespace
                         }
                     }
                 }
+#if DRIPSIM_SOAK_FLOW
+                if (!g_cur->flow.Empty()) {
+                    g_cur->flow.Step(*g_cur->field, *g_cur->layer, dt, g_cfg.flow, g_s.soakStart > 0.0f ? g_s.soak / g_s.soakStart : 0.0f, g_cfg.flow.drawn);
+                    flowMs += g_cur->flow.Ms();
+                    flowJobMs += g_cur->flow.JobMs();
+                    flowWater += g_cur->flow.Water();
+                    flowing = flowing || !g_cur->flow.Empty();
+                } else {
+                    g_cur->flow.Push(*g_cur->layer, g_cfg.flow.drawn);  // (clears the layer's map once, after the last of the water)
+                }
+#endif
                 if (g_cfg.soakFilm) {  // the even wet sheen of the skin that was under water
                     const float held = g_s.soak > 0.02f ? 1.0f : std::max(0.0f, 1.0f - static_cast<float>(g_s.dryFor) / std::max(g_cfg.soakDry, 1.0f));
                     // (the body's flow sheet is the wet skin there: the full-skin film on top of it only made every tile of the body heavy to render)
+#if DRIPSIM_SOAK_FLOW
+                    const bool sheet = g_cfg.soakFlow && g_cur->name == "body" && g_cur->drip;
+#else
                     const bool sheet = false;  // (the free soak has no sheet)
+#endif
                     // the face: no wet tint. Its overlay still z-fights with the head in some triangles (OverlayDecal only made it smaller); with the correct
                     // (premultiplied) colours the tint darkens the skin, and the hidden triangles showed as patches (game test 2026-11-12). Its wet look is the shine.
                     const bool face = g_cur->name == "face";
@@ -700,7 +771,7 @@ namespace
             float depth = 0.0f;
             if (g_cfg.autoSoak && WatchWater(world, dt, &depth)) {  // out of the water: it comes off the skin
                 RainRequestSoak(SoakStrength(depth, depth >= 400.0f), depth);
-                api->Start("rain", 2);
+                api->Start(kModeName, 2);
                 return;
             }
             if (!g_cfg.autoStart) return;
@@ -715,7 +786,7 @@ namespace
                 }
             }
             if (sheltered) return;
-            if (intensity > g_cfg.startIntensity) api->Start("rain", -1);
+            if (intensity > g_cfg.startIntensity) api->Start(kModeName, -1);
         }
 
         void Reload() override { LoadSettings(); }
