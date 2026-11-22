@@ -104,6 +104,20 @@ namespace
         bool flagsLogged = false;
     };
     std::array<Slot, DS::Surface::Count> g_slots;
+
+    // The skin material's real shine, kept across runs (a Slot is cleared on every stop). After an overlay refresh (clothes change, RaceMenu) the material
+    // can still carry DripSim's wet values when the next run starts; saving those as the "original" made the skin stay glossy after the rain, and the values
+    // grew run after run (a player's report 2026-11-14: power 30 -> 87.7 -> 330, scale 3 -> 10). So: if the material holds exactly what DripSim set last,
+    // the remembered original is used.
+    struct SpecMemory
+    {
+        bool known = false;
+        float power = 0.0f, scale = 0.0f;  // the real material values
+        bool set = false;
+        float setPower = 0.0f, setScale = 0.0f;  // what DripSim wrote last
+    };
+    std::array<SpecMemory, DS::Surface::Count> g_specMemory;
+
     bool g_normalMaps = false;
     bool g_specMaps = false;
     bool g_premul = false;
@@ -658,10 +672,15 @@ namespace DS::Spike
             if (!geometry || !material || !material->diffuseTexture) continue;
             auto set = material->GetTextureSet();
             const char* path = set ? set->GetTexturePath(RE::BSTextureSet::Texture::kDiffuse) : nullptr;
-            if (IsBlank(path) || IsOurs(path)) {
+            // the texture the slot really draws: another tool that swaps textures the same way (DripSim / HeavyMagic) keeps the overlay's own (blank) paths in the set,
+            // so the set alone called its slot free; two tools in one slot reloaded each other's material and freed textures still in use (GPU driver crash 2026-11-18)
+            const char* live = material->diffuseTexture->name.c_str();
+            const bool liveFree = !live || !*live || IsBlank(live) || IsOurs(live);
+            if (!liveFree && IsBlank(path) && DS::LogAllow(std::format("tex-slot-busy-{}-{}", surface, i), 2, 600)) logger::info("Texture {}: '{}' is in use ('{}'); skipped", DS::Surface::Name(surface), geometry->name.c_str(), live);
+            if (liveFree && (IsBlank(path) || IsOurs(path))) {
                 if (!ours) ours = geometry;
                 if (IsOurs(path) && DS::LogAllow("tex-reuse-ours", 3, 600)) logger::info("Texture {}: '{}' still has DripSim's placeholder from an earlier run: it is used again", DS::Surface::Name(surface), geometry->name.c_str());
-            } else if (DS::Params::Get().donor && !donor && material->diffuseTexture->rendererTexture && material->diffuseTexture->rendererTexture->resourceView) {
+            } else if (DS::Params::Get().donor && !donor && !IsBlank(path) && material->diffuseTexture->rendererTexture && material->diffuseTexture->rendererTexture->resourceView) {
                 donor = material->diffuseTexture.get();
                 logger::info("Texture {}: donor texture {}", DS::Surface::Name(surface), path);
             }
@@ -958,11 +977,24 @@ namespace DS::Spike
         if (s.phase != Phase::Running || s.owner != owner) return;
         auto* material = MaterialOf(s.shape.get());
         if (!material) return;
+        auto& memory = g_specMemory[static_cast<std::size_t>(surface)];
         if (!s.specSaved) {
-            s.origSpecPower = material->specularPower;
-            s.origSpecScale = material->specularColorScale;
+            const float nowPower = material->specularPower;
+            const float nowScale = material->specularColorScale;
+            const bool stillOurs = memory.known && memory.set && std::abs(nowPower - memory.setPower) < 1e-3f && std::abs(nowScale - memory.setScale) < 1e-3f;
+            if (stillOurs) {
+                s.origSpecPower = memory.power;
+                s.origSpecScale = memory.scale;
+            } else {
+                s.origSpecPower = nowPower;
+                s.origSpecScale = nowScale;
+                memory.known = true;
+                memory.power = nowPower;
+                memory.scale = nowScale;
+            }
             s.specSaved = true;
-            if (DS::LogAllow("tex-spec")) logger::info("Texture {}: material specular power {:.1f} scale {:.2f} (saved)", DS::Surface::Name(surface), s.origSpecPower, s.origSpecScale);
+            if (DS::LogAllow("tex-spec")) logger::info("Texture {}: material specular power {:.1f} scale {:.2f} (saved{})", DS::Surface::Name(surface), s.origSpecPower, s.origSpecScale,
+                stillOurs ? std::format("; the material still had DripSim's {:.1f} / {:.2f}", nowPower, nowScale) : std::string());
         }
         const float wantPower = has ? power : s.origSpecPower;
         const float wantScale = has ? scale : s.origSpecScale;
@@ -971,6 +1003,9 @@ namespace DS::Spike
         material->specularColorScale = wantScale;
         s.lastPower = wantPower;
         s.lastScale = wantScale;
+        memory.set = true;
+        memory.setPower = wantPower;
+        memory.setScale = wantScale;
     }
 
     // Debug (KeyFilmDump): writes the pixels DripSim is showing on each running surface (what the plugin sends to the GPU, before the engine lights it) to

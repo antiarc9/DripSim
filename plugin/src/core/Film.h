@@ -92,6 +92,7 @@ namespace DS::Film
     void SetSpecMapsEnabled(bool on);
     void SetPremultiplied(int surface, bool on);
     void SetGlossCompensation(int surface, bool on);  // the surface's gloss map runs with the normal blend: the gloss is divided by the film's opacity, the material's specular scale raised to match  // the surface's overlay blends premultiplied: its final pixels are written as rgb x alpha (a change re-composites all)  // the framework's SpecMaps setting (with NormalMaps): the compositor also makes a gloss map
+    void SetWetDetail(float gloss, float bump);  // the INI's WetDetail / WetDetailBump (0 = off): the baked wet-skin detail on water films of the body (WetDetail.h)
     void SetNormalMapsEnabled(bool on);  // the framework's NormalMaps setting: with it off no layer computes slopes or normals
     Layer* Acquire(int surface, const std::uint8_t* keepMask);  // nullptr when all are taken; the layer comes back cleared with the default look
     void Release(int surface, Layer* layer);

@@ -16,9 +16,20 @@
 //          --rain X      rain intensity 0..1 (forced mode, default 0.9)   --skin r,g,b   --soak D   water that comes off a dunk, skin below D game units wet (1000 = all)
 //          --atlas       also write the raw 1024x1024 film        --verbose            print the mode's log lines
 //          --also-rain   runs the rain mode in a second layer on top of the main mode (stacking test)
+#ifdef DRIPSIM_WITH_SWEAT
+// Private build: also --mode sweat and --heat X (the body heat it holds, 0..1, default 0.9).
+#endif
 #include "Field.h"
 #include "Film.h"
+#include "WetDetail.h"
 #include "RainMode.h"
+#ifdef DRIPSIM_WITH_SWEAT
+#include "SweatMode.h"
+#endif
+#ifdef DRIPSIM_WITH_HEAVYMAGIC
+#include "SkinMode.h"
+#include "Fx.h"
+#endif
 
 namespace
 {
@@ -97,7 +108,7 @@ namespace
     class Host final : public DripSim::IHost
     {
     public:
-        Host(DS::Film::Layer* layer, const FieldView* field, const PreviewWorld* world) : m_layer(layer), m_field(field), m_world(world) {}
+        Host(DripSim::ILayer* layer, const FieldView* field, const PreviewWorld* world) : m_layer(layer), m_field(field), m_world(world) {}
         bool Raycast(const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const override
         {
             DS::Field::RayHit hit;
@@ -113,6 +124,10 @@ namespace
             return true;
         }
         bool BodyBounds(float lo[3], float hi[3]) const override { return DS::Field::Get(DS::Surface::Body).Bounds(lo, hi); }
+        bool RaycastSurface(std::int32_t index, const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const override
+        {
+            return index == 0 && Raycast(from, dir, maxDist, out);  // the preview has the body only
+        }
         DripSim::ILayer* Layer() override { return m_layer; }
         const DripSim::IField* Field() const override { return m_field; }
         const DripSim::IWorld* World() const override { return m_world; }
@@ -125,7 +140,7 @@ namespace
         bool finished = false;
 
     private:
-        DS::Film::Layer* m_layer;
+        DripSim::ILayer* m_layer;
         const FieldView* m_field;
         const PreviewWorld* m_world;
     };
@@ -223,7 +238,8 @@ namespace
 
     float Dot(Vec3 a, Vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
-    std::vector<std::uint8_t> RenderBody(const DS::Body::Static& body, const DS::Film::Layer& layer, const std::uint32_t* film, const std::uint32_t* filmNormals, const View& view, float zMin, float zMax)
+    std::vector<std::uint8_t> RenderBody(const DS::Body::Static& body, const DS::Film::Layer& layer, const std::uint32_t* film, const std::uint32_t* filmNormals, const View& view, float zMin, float zMax,
+        const std::uint32_t* glow = nullptr, float glowMult = 1.0f)
     {
         const std::size_t nv = body.vertexCount;
         std::vector<Vec3> normal(nv, Vec3{ 0, 0, 0 });
@@ -324,6 +340,13 @@ namespace
                     }
                     const float a = c[3] * alphaScale;
                     float out[3] = { skin[0], skin[1], skin[2] };
+                    float glowAdd[3] = { 0.0f, 0.0f, 0.0f };
+                    if (glow) {
+                        const std::uint32_t g = glow[static_cast<std::size_t>(iy + (ty > 0.5f ? 1 : 0)) * DS::Film::kSize + static_cast<std::size_t>(ix + (tx > 0.5f ? 1 : 0))];
+                        glowAdd[0] = static_cast<float>(g & 0xFF) * glowMult;
+                        glowAdd[1] = static_cast<float>((g >> 8) & 0xFF) * glowMult;
+                        glowAdd[2] = static_cast<float>((g >> 16) & 0xFF) * glowMult;
+                    }
                     if (a > 1e-4f) {
                         const float inv = alphaScale / std::max(c[3] * alphaScale, 1e-4f);
                         Vec3 nf = nr;  // the shading normal of the film: its normal map when there is one
@@ -340,6 +363,7 @@ namespace
                             out[k] = skin[k] * (1.0f - a) + filmColour * a + 255.0f * spec * std::min(1.0f, a * 3.0f) * inv * a;
                         }
                     }
+                    for (int k = 0; k < 3; ++k) out[k] += glowAdd[k];  // HeavyMagic glow
                     for (int k = 0; k < 3; ++k) image[zi * 3 + static_cast<std::size_t>(k)] = static_cast<std::uint8_t>(std::clamp(out[k], 0.0f, 255.0f));
                 }
             }
@@ -350,11 +374,23 @@ namespace
     // The modes by name (nullptr = unknown; a public build only knows "rain"), and the INI each mode reads.
     DripSim::IMode* ModeByName(const std::string& name)
     {
+#ifdef DRIPSIM_WITH_SWEAT
+        if (name == "sweat") return SweatModeInstance();
+#endif
+#ifdef DRIPSIM_WITH_HEAVYMAGIC
+        if (name == HM::Skin::kModeName) return HM::Skin::Mode();
+#endif
         return name == "rain" ? RainModeInstance() : nullptr;
     }
 
     std::string IniName([[maybe_unused]] const std::string& mode)
     {
+#ifdef DRIPSIM_WITH_HEAVYMAGIC
+        if (mode == HM::Skin::kModeName) return "HeavyMagic";
+#endif
+#ifdef DRIPSIM_WITH_SWEAT
+        if (mode == "sweat") return "DripSimSweat";
+#endif
         return "DripSimRain";
     }
 
@@ -371,10 +407,14 @@ namespace
         std::string ini;
         int variant = 0;
         float rain = 0.9f;
+#ifdef DRIPSIM_WITH_SWEAT
+        float heat = 0.9f;  // sweat mode: the held body heat
+#endif
         bool alsoRain = false;  // a second layer with the rain mode on top of the main mode
         float soak = 0.0f;  // rain mode: a soak (water to this many game units; 1000 = all of the body) instead of rain
         int seed = 7;
         bool atlas = false;
+        std::string wetDetail;  // --wetdetail <DripSim_WetDetail.bin>[,gloss,bump]: the baked wet-skin detail (framework INI WetDetail / WetDetailBump)
     };
 
     std::vector<std::string> Split(const std::string& text, char sep)
@@ -417,6 +457,9 @@ namespace
             else if (k == "--variant") a.variant = std::stoi(next());
             else if (k == "--rain") a.rain = std::stof(next());
             else if (k == "--soak") a.soak = std::stof(next());
+#ifdef DRIPSIM_WITH_SWEAT
+            else if (k == "--heat") a.heat = std::stof(next());
+#endif
             else if (k == "--also-rain") a.alsoRain = true;
             else if (k == "--skin") {
                 const auto p = Split(next(), ',');
@@ -426,6 +469,7 @@ namespace
             }
             else if (k == "--seed") a.seed = std::stoi(next());
             else if (k == "--atlas") a.atlas = true;
+            else if (k == "--wetdetail") a.wetDetail = next();
             else if (k == "--verbose") logger::verbose = true;
             else {
                 std::printf("unknown option %s (see the header of Preview.cpp)\n", k.c_str());
@@ -469,6 +513,9 @@ int main(int argc, char** argv)
     {  // the mode reads Data\SKSE\Plugins\<name>.ini relative to the current directory: give it one with the requested settings
         std::ofstream ini(std::filesystem::path(args.out) / "Data" / "SKSE" / "Plugins" / (iniName + ".ini"));
         if (args.mode == "rain") ini << "ForcedIntensity=" << args.rain << "\n";
+#ifdef DRIPSIM_WITH_SWEAT
+        if (args.mode == "sweat") ini << "ForcedHeat=" << args.heat << "\n";
+#endif
         if (args.mode == "rain" && args.soak > 0.0f) ini << "EnableSoak=1\n";
         for (const auto& kv : Split(args.ini, ',')) {
             if (!kv.empty()) ini << kv << "\n";
@@ -478,7 +525,20 @@ int main(int argc, char** argv)
         std::ofstream rainIni(std::filesystem::path(args.out) / "Data" / "SKSE" / "Plugins" / "DripSimRain.ini");
         rainIni << "ForcedIntensity=" << args.rain << "\n";
     }
+    float detailGloss = 0.0f;
+    float detailBump = 0.0f;
+    if (!args.wetDetail.empty()) {  // the framework reads Data\SKSE\Plugins\DripSim_WetDetail.bin: copy it there
+        const auto p = Split(args.wetDetail, ',');
+        std::filesystem::copy_file(p[0], std::filesystem::path(args.out) / "Data" / "SKSE" / "Plugins" / "DripSim_WetDetail.bin", std::filesystem::copy_options::overwrite_existing, ec);
+        detailGloss = p.size() > 1 ? std::stof(p[1]) : 1.0f;
+        detailBump = p.size() > 2 ? std::stof(p[2]) : 1.0f;
+    }
     std::filesystem::current_path(args.out, ec);
+    if (detailGloss > 0.0f) {
+        DS::WetDetail::Load();
+        DS::Film::SetWetDetail(detailGloss, detailBump);
+        std::printf("wet detail %s (gloss %.2f, bump %.2f)\n", DS::WetDetail::Ready() ? "loaded" : "MISSING", detailGloss, detailBump);
+    }
 
     auto& field = DS::Field::Get(DS::Surface::Body);
     if (!field.Build(body)) {
@@ -492,7 +552,38 @@ int main(int argc, char** argv)
     DS::Film::SetNormalMapsEnabled(true);
     DS::Film::SetSpecMapsEnabled(args.atlas);  // (the gloss map is only written out with --atlas)
     auto* layer = DS::Film::Acquire(DS::Surface::Body, field.KeepMask().data());
-    Host host(layer, &fieldView, &world);
+    DripSim::ILayer* modeLayer = layer;
+#ifdef DRIPSIM_WITH_HEAVYMAGIC
+    // HeavyMagic: the band is drawn by its FX renderer (the potion texture), not by the film
+    static HM::Fx::Surface fx;
+    static std::vector<float> fxPositions;
+    static std::string fxDir;
+    const bool useFx = args.mode == HM::Skin::kModeName;
+    if (useFx) {
+        HM::Fx::BuildPositions(field.PaddedTriRaster().data(), body->position.data(), body->triangle.data(), body->triangleCount, fxPositions);
+        fx.Allocate(field.KeepMask().data(), fxPositions.data());
+        fx.SetParams(HM::Fx::LoadParams(fxDir));
+        fx.SetStyle(HM::Fx::Style{}, fxDir);
+        HM::Skin::SetStyleSink([](const HM::Skin::Profile& p) {
+            HM::Fx::Style style;
+            style.noise = p.noise ? p.noise : "";
+            style.palette = p.palette ? p.palette : "";
+            for (int c = 0; c < 3; ++c) {
+                style.body[c] = p.body[c];
+                style.rim[c] = p.rim[c];
+                style.halo[c] = p.halo[c];
+            }
+            fx.SetStyle(style, fxDir);
+        });
+        HM::Skin::SetMesh(body->position.data(), body->uv.data(), body->triangle.data(), static_cast<std::uint32_t>(body->position.size() / 3), static_cast<std::uint32_t>(body->triangle.size() / 3));
+        HM::Skin::SetChannelSink([](int hand) { fx.SetChannel(hand); });
+        modeLayer = &fx;
+        std::printf("HeavyMagic FX: textures from %s\n", fxDir.c_str());
+    }
+#else
+    const bool useFx = false;
+#endif
+    Host host(modeLayer, &fieldView, &world);
     DripSim::IMode* mode = ModeByName(args.mode);
     if (args.mode == "rain" && args.soak > 0.0f) {
         world.rain = 0.0f;
@@ -522,17 +613,28 @@ int main(int argc, char** argv)
     for (float t = 0.0f; t <= runFor + dt * 0.5f; t += dt, ++frames) {
         const auto m0 = std::chrono::steady_clock::now();
         DS::Film::BeginFrame(DS::Surface::Body);
+#ifdef DRIPSIM_WITH_HEAVYMAGIC
+        if (useFx) fx.BeginFrame();
+#endif
         mode->Update(&host, dt);
         if (mode2) mode2->Update(&host2, dt);
         DS::Film::EndFrame(DS::Surface::Body);
         const auto m1 = std::chrono::steady_clock::now();
         DS::Film::Render(DS::Surface::Body);
+#ifdef DRIPSIM_WITH_HEAVYMAGIC
+        if (useFx) fx.Render(t);
+#endif
         const auto m2 = std::chrono::steady_clock::now();
         modeMs += std::chrono::duration<double, std::milli>(m1 - m0).count();
         renderMs += std::chrono::duration<double, std::milli>(m2 - m1).count();
         while (nextShot < args.at.size() && t + dt * 0.5f >= args.at[nextShot]) {
             const auto name = std::format("{}_{}_t{:04.1f}.png", args.mode, args.viewName, args.at[nextShot]);
+#ifdef DRIPSIM_WITH_HEAVYMAGIC
+            const auto pixels = useFx ? RenderBody(*body, *layer, fx.Straight(), nullptr, args.view, field.ZMin() - 10.0f, field.ZMax() + 10.0f, fx.Glow(), 0.8f)
+                                      : RenderBody(*body, layer2 ? *layer2 : *layer, DS::Film::Pixels(DS::Surface::Body), DS::Film::NormalPixels(DS::Surface::Body), args.view, field.ZMin() - 10.0f, field.ZMax() + 10.0f);
+#else
             const auto pixels = RenderBody(*body, layer2 ? *layer2 : *layer, DS::Film::Pixels(DS::Surface::Body), DS::Film::NormalPixels(DS::Surface::Body), args.view, field.ZMin() - 10.0f, field.ZMax() + 10.0f);
+#endif
             WritePng(name, pixels, args.view.width, args.view.height);
             if (args.atlas) {
                 constexpr int kAtlas = DS::Film::kSize;

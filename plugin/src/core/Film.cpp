@@ -3,6 +3,7 @@
 #include "Film.h"
 
 #include "Field.h"
+#include "WetDetail.h"
 
 #include <execution>
 #include <mutex>
@@ -52,6 +53,11 @@ namespace
 
     bool g_normalsOn = false;
     bool g_specOn = false;
+    // the baked wet-skin detail (WetDetail.h) on water films of the body; set every frame from the INI (WetDetail, WetDetailBump), read by the tile threads
+    std::atomic<float> g_wetDetail{ 0.0f };
+    std::atomic<float> g_wetDetailBump{ 0.0f };
+    constexpr float kDetailThick = 1.0f / (13.0f * 0.15f);  // thickness units per mm of water (13 mm per game unit, kHeightUnits game units per thickness unit)
+    constexpr float kDetailDull = 0.4f;  // how much the wet detail dulls the gloss between the beads, per unit of WetDetail
     constexpr float kGlossRef = 0.15f;  // the opacity at which the gloss is not raised (gloss compensation)
     std::atomic<std::uint64_t> g_tilesRendered{ 0 };
     double g_partMs[4] = {};  // layers, composite, normals, gloss (main or job thread, one at a time: a statistic)
@@ -291,6 +297,12 @@ namespace DS::Film
     void SetSpecMapsEnabled(bool on)
     {
         g_specOn = on;
+    }
+
+    void SetWetDetail(float gloss, float bump)
+    {
+        g_wetDetail.store(gloss, std::memory_order_relaxed);
+        g_wetDetailBump.store(bump, std::memory_order_relaxed);
     }
 
     void SetGlossCompensation(int surface, bool on)
@@ -624,10 +636,12 @@ namespace DS::Film
                 if (wantNormals) {
                     // Water: a thin trail (thickness ~0.4, a pixel or two wide) is all slope, so the engine's light made a white hairline along it (seen in game 2026-11-10).
                     // The normal map only gets slopes next to something thick (a bead or a runner head within 2 px): a trail stays flat for the lights and shows as a faint wet line.
+                    // A mode with a cream look (creamStart > 0, 2026-11-13): the same for the clear thin film: only the cream (thicker than creamStart) bends the lights, so the film is a smooth gloss, not embossed.
                     float slopeKeep = 1.0f;
-                    if (look.creamStart <= 0.0f && x >= 2 && y >= 2 && x < w - 2 && y < h - 2) {  // (the tile edge keeps its slope)
+                    const float thick = look.creamStart > 0.0f ? look.creamStart + 0.15f : 0.45f;
+                    if (x >= 2 && y >= 2 && x < w - 2 && y < h - 2) {  // (the tile edge keeps its slope)
                         const float around = std::max({ hn(x - 2, y, v), hn(x + 2, y, v), hn(x, y - 2, v), hn(x, y + 2, v), hn(x - 2, y - 2, v), hn(x + 2, y + 2, v), hn(x - 2, y + 2, v), hn(x + 2, y - 2, v), v });
-                        slopeKeep = std::clamp((around - 0.45f) / 0.35f, 0.0f, 1.0f);
+                        slopeKeep = std::clamp((around - thick) / 0.35f, 0.0f, 1.0f);
                     }
                     slx[at(x, y)] = gxv * slopeKeep;
                     sly[at(x, y)] = gyv * slopeKeep;
@@ -658,7 +672,7 @@ namespace DS::Film
                 const float lap = (hn(x - 1, y, v) + hn(x + 1, y, v) + hn(x, y - 1, v) + hn(x, y + 1, v) - 4.0f * v) * kScaleF * kScaleF;  // < 0 on a bulge (per sim pixel squared)
                 const float glint = std::clamp(-lap * 7.0f, 0.0f, 1.0f) * (0.4f + 0.6f * lit) * look.glint * (look.creamStart <= 0.0f ? 0.3f : 1.0f);  // (water: the sharp highlight comes from the dome shading below)
                 const float facing = (1.0f - look.rimDirection) * (0.45f + 0.55f * lit) + look.rimDirection * (0.05f + 0.95f * lit * lit);  // the crescent facing the light
-                const float rimBase = std::min(std::clamp(gm * (5.0f + (look.filmAlpha > 0.0f ? 10.0f * std::exp(-4.0f * v) : 0.0f)), 0.0f, 1.0f) * facing * look.rimAlpha, 1.0f) * (0.55f + 0.45f * rimvar);
+                const float rimBase = std::min(std::clamp(gm * (5.0f + (look.filmAlpha > 0.0f ? (look.creamStart > 0.0f ? 3.0f : 10.0f) * std::exp(-4.0f * v) : 0.0f)), 0.0f, 1.0f) * facing * look.rimAlpha, 1.0f) * (0.55f + 0.45f * rimvar);
                 const float rim = 1.0f - (1.0f - rimBase) * (1.0f - std::min(glint * 0.85f, 0.95f));
                 const float mod = 1.0f + look.mottle * (0.055f * g_mott[gi] + 0.02f * g_grain[gi]);
                 float a = 1.0f - (1.0f - aBody) * (1.0f - rim);
@@ -749,6 +763,11 @@ namespace DS::Film
         }
 
         const auto& padRaster = DS::Field::Get(m_surface).PaddedTriRaster();
+        // the baked wet-skin detail: sweat only (the look that asks for a clear drop, creamStart < -0.5), on the body only (the map is in the body's UV).
+        // Rain and soak do not get it (game test 2026-11-18: no gain there, and the skin read as shiny plastic)
+        const bool detailOn = m_surface == DS::Surface::Body && look.creamStart < -0.5f && DS::WetDetail::Ready();
+        const float detailGloss = detailOn ? g_wetDetail.load(std::memory_order_relaxed) : 0.0f;
+        const float detailBump = detailOn && detailGloss > 0.0f ? g_wetDetailBump.load(std::memory_order_relaxed) * kDetailThick : 0.0f;
         // the opacity of plain wet skin (the wet film plus its halo): the gloss map counts anything at or above it as fully wet
         const float wetBase = look.filmAlpha > 0.0f ? look.filmAlpha + (1.0f - look.filmAlpha) * look.haloAlpha * std::clamp(1.8f * look.filmAlpha, 0.0f, 1.0f) : 0.1f;
         for (int gy = y0; gy < y0 + kTile; ++gy) {
@@ -787,17 +806,29 @@ namespace DS::Film
                     slx[at(x, y)] += (fn(x + 2, y) - fn(x - 2, y)) * 0.25f * kScaleF * m_flowBump;  // (+-2 px: the map is bilinear from 4 px cells)
                     sly[at(x, y)] += (fn(x, y + 2) - fn(x, y - 2)) * 0.25f * kScaleF * m_flowBump;
                 }
+                // the gloss map: wet skin (film, sheen, halo) shines, a drop or a stream a little more; dry skin not at all
+                const float wet = std::clamp(aOut / std::max(wetBase, 0.02f), 0.0f, 1.0f);
+                float detail = 1.0f;
+                if (detailGloss > 0.0f && wet > 0.0f) {
+                    // the skin between the beads is duller (kDetailDull per unit of WetDetail), the beads and specks shine: an even gloss read as plastic
+                    detail = std::max(1.0f + detailGloss * (DS::WetDetail::Gloss(gx, gy) - 1.0f - kDetailDull), 0.0f);
+                    if (wantNormals && detailBump > 0.0f) {  // the drops as bumps: their height on top of the film's own thickness, where the skin is wet
+                        float dx = 0.0f;
+                        float dy = 0.0f;
+                        DS::WetDetail::Slope(gx, gy, dx, dy);
+                        slx[at(x, y)] += dx * detailBump * wet;
+                        sly[at(x, y)] += dy * detailBump * wet;
+                    }
+                }
                 if (wantNormals) {
                     constexpr float kFix = 8192.0f;
                     m_slope[Index(gx, gy) * 2] = static_cast<std::int16_t>(std::clamp(slx[at(x, y)] * kFix, -32000.0f, 32000.0f));
                     m_slope[Index(gx, gy) * 2 + 1] = static_cast<std::int16_t>(std::clamp(sly[at(x, y)] * kFix, -32000.0f, 32000.0f));
                 }
-                // the gloss map: wet skin (film, sheen, halo) shines, a drop or a stream a little more; dry skin not at all
-                const float wet = std::clamp(aOut / std::max(wetBase, 0.02f), 0.0f, 1.0f);
                 // the engine scales the overlay's shine by its opacity (normal blend): the gloss is divided by it here and the material's specular scale is raised by
                 // 1 / kGlossRef (MaterialSpec), so thin wet skin shines as much as a drop (with the premultiplied blend that is already so)
                 const float comp = m_glossComp ? std::min(1.0f, kGlossRef / std::max(aOut, kGlossRef)) : 1.0f;
-                m_gloss[Index(gx, gy)] = static_cast<std::uint8_t>(byte(wet * (0.75f + 0.25f * std::clamp(aF * 4.0f, 0.0f, 1.0f)) * comp * 255.0f));
+                m_gloss[Index(gx, gy)] = static_cast<std::uint8_t>(byte(wet * (0.75f + 0.25f * std::clamp(aF * 4.0f, 0.0f, 1.0f)) * comp * detail * 255.0f));
                 m_pixels[Index(gx, gy)] = (byte(aOut * 255.0f) << 24) | (byte(out[2] * look.brightness) << 16) | (byte(out[1] * look.brightness) << 8) | byte(out[0] * look.brightness);
             }
         }

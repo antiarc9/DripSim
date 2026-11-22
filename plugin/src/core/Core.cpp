@@ -89,6 +89,7 @@ namespace
         const DripSim::IField* SurfaceField(std::int32_t index) const override;
         bool Raycast(const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const override;
         bool BodyBounds(float lo[3], float hi[3]) const override { return DS::Field::Get(DS::Surface::Body).Bounds(lo, hi); }
+        bool RaycastSurface(std::int32_t index, const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const override;
 
     private:
         Entry* m_entry;
@@ -124,8 +125,15 @@ namespace
 
     bool Host::Raycast(const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const
     {
+        return RaycastSurface(0, from, dir, maxDist, out);
+    }
+
+    bool Host::RaycastSurface(std::int32_t index, const float from[3], const float dir[3], float maxDist, DripSim::Hit* out) const
+    {
+        if (index < 0 || index >= SurfaceCount()) return false;
+        const int surface = index == 0 ? static_cast<int>(DS::Surface::Body) : static_cast<int>(m_entry->surfaces[static_cast<std::size_t>(index)]);
         DS::Field::RayHit hit;
-        if (!out || !DS::Field::Get(DS::Surface::Body).Raycast(from, dir, maxDist, &hit)) return false;
+        if (!out || !DS::Field::Get(surface).Raycast(from, dir, maxDist, &hit)) return false;
         out->x = hit.x;
         out->y = hit.y;
         out->tx = hit.tx;
@@ -650,7 +658,7 @@ namespace DS::Core
 
     bool WantsKey(std::uint32_t key)
     {
-        if (key == kKeyF10) return true;  // F10 (re-read the settings) is always on
+        if (key == kKeyF10) return DS::Params::Get().reloadKey;  // F10 (re-read the settings): on unless ReloadKey=0
         if (!DS::Params::Get().hotkeys) return false;  // Hotkeys=0 (the default): no other key
         if ((key == kKeyG || key == kKeyH) && DS::Params::Get().debugKeys) return true;
         std::scoped_lock lock(g_hotkeyMutex);
@@ -674,14 +682,16 @@ namespace DS::Core
     void OnKey(std::uint32_t key, bool shift, bool ctrl)
     {
         if (!CanUseHotkeys()) return;
-        if (key == kKeyF10) return ReloadAll(true);  // always on
+        if (key == kKeyF10) {  // on unless ReloadKey=0
+            if (DS::Params::Get().reloadKey) ReloadAll(true);
+            return;
+        }
         if (!DS::Params::Get().hotkeys) return;
         if (DS::Params::Get().debugKeys) {  // the author's debug keys (DebugKeys=1 in DripSim.ini; off for players: Ctrl is the crouch key)
             if (key == kKeyH && ctrl && shift) return DS::Spike::RequestBodyDump();
             if (key == kKeyH && ctrl) return DS::Spike::DumpPlayerShapes();
             if (key == kKeyG && ctrl && shift) return DS::Spike::ToggleGravityView();
         }
-        if (key == kKeyF10) return ReloadAll(true);
         std::vector<Hotkey> matches;
         {
             std::scoped_lock lock(g_hotkeyMutex);
@@ -1018,6 +1028,7 @@ namespace DS::Core
         DS::Spike::TextureSetDecal(DS::Params::Get().overlayDecal);
         DS::Film::SetNormalMapsEnabled(DS::Params::Get().normalMaps);
         DS::Film::SetSpecMapsEnabled(DS::Params::Get().normalMaps && DS::Params::Get().specMaps);
+        DS::Film::SetWetDetail(DS::Params::Get().wetDetail, DS::Params::Get().wetDetailBump);
         for (int s = 0; s < DS::Surface::Count; ++s) {
             if (!Ready(s)) continue;
             float power = 0.0f;
@@ -1058,6 +1069,32 @@ namespace DS::Core
     void SetGameInfo(const std::string& text) { g_gameInfo = text; }
     void SetSystemInfo(const std::string& text) { g_systemInfo = text; }
 
+    // A file name as UTF-8. path::string() converts to the ANSI code page and THROWS for a name it cannot show (a Chinese or Japanese mod name):
+    // that crashed players' games in the automatic report (crash logs of 2026-11-14, SE 1.6.1170). This never throws.
+    std::string Utf8(const std::filesystem::path& path)
+    {
+        const std::wstring& wide = path.native();
+        if (wide.empty()) return {};
+        const int size = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+        if (size <= 0) return "?";
+        std::string out(static_cast<std::size_t>(size), '\0');
+        ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), size, nullptr, nullptr);
+        return out;
+    }
+
+    // Every entry of a folder, without exceptions (a range-for over directory_iterator throws on a failed step, even when constructed with an error code).
+    std::vector<std::filesystem::directory_entry> ListFolder(const std::filesystem::path& folder)
+    {
+        std::vector<std::filesystem::directory_entry> out;
+        std::error_code ec;
+        std::filesystem::directory_iterator it(folder, ec);
+        for (int guard = 0; !ec && it != std::filesystem::directory_iterator() && guard < 100000; ++guard) {
+            out.push_back(*it);
+            it.increment(ec);
+        }
+        return out;
+    }
+
     // The last `count` lines of a text file (empty when it cannot be read).
     std::vector<std::string> TailOf(const std::filesystem::path& path, std::size_t count)
     {
@@ -1086,7 +1123,21 @@ namespace DS::Core
     }
 
     // One file with everything a bug report needs: the versions, what is loaded, the state of the surfaces and the tail of every DripSim log. The player attaches this one file.
+    void WriteReportUnsafe(bool notify);
+
+    // The report must never take the game down: any exception is logged and the report is left as far as it got.
     void WriteReport(bool notify)
+    {
+        try {
+            WriteReportUnsafe(notify);
+        } catch (const std::exception& e) {
+            logger::warn("Report: could not be completed ({}); the game goes on", e.what());
+        } catch (...) {
+            logger::warn("Report: could not be completed (unknown error); the game goes on");
+        }
+    }
+
+    void WriteReportUnsafe(bool notify)
     {
         const auto directory = SKSE::log::log_directory();
         if (!directory) return;
@@ -1104,13 +1155,12 @@ namespace DS::Core
         out << (g_session.on ? "(an effect is running now) " : "") << "last effect run: " << g_lastSummary << "\n";
 
         out << "\n== Address Library files in Data\\\\SKSE\\\\Plugins\n";
-        std::error_code ec;
         bool anyAddress = false;
-        for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path("Data") / "SKSE" / "Plugins", ec)) {
-            auto name = entry.path().filename().string();
+        for (const auto& entry : ListFolder(std::filesystem::path("Data") / "SKSE" / "Plugins")) {
+            auto name = Utf8(entry.path().filename());
             std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
             if (name.starts_with("version-") || name.starts_with("versionlib-")) {
-                out << "  " << entry.path().filename().string() << "\n";
+                out << "  " << Utf8(entry.path().filename()) << "\n";
                 anyAddress = true;
             }
         }
@@ -1122,7 +1172,7 @@ namespace DS::Core
             module.dwSize = sizeof(module);
             for (BOOL ok = ::Module32FirstW(snap, &module); ok; ok = ::Module32NextW(snap, &module)) {
                 const std::wstring name = module.szModule;
-                if (name.starts_with(L"DripSim")) out << "  " << std::filesystem::path(name).string() << "\n";
+                if (name.starts_with(L"DripSim")) out << "  " << Utf8(std::filesystem::path(name)) << "\n";
             }
             ::CloseHandle(snap);
         }
@@ -1148,9 +1198,10 @@ namespace DS::Core
         }
         out << "  overlay textures use " << DS::Atlas::kFilm << " x " << DS::Atlas::kFilm << " pixels each (4 bytes a pixel, plus the same again for the normal map)\n";
 
-        for (const auto& entry : std::filesystem::directory_iterator(*directory, ec)) {
-            const auto name = entry.path().filename().string();
-            if (!entry.is_regular_file() || !name.starts_with("DripSim") || entry.path().extension() != ".log") continue;
+        for (const auto& entry : ListFolder(*directory)) {
+            const auto name = Utf8(entry.path().filename());
+            std::error_code ec;
+            if (!entry.is_regular_file(ec) || !name.starts_with("DripSim") || !name.ends_with(".log")) continue;
             const bool main = name == "DripSim.log";
             out << "\n== " << name << " (last " << (main ? 250 : 80) << " lines)\n";
             for (const auto& line : TailOf(entry.path(), main ? 250 : 80)) out << line << "\n";
